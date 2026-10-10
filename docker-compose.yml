@@ -1,0 +1,24 @@
+services:
+  rivet-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rivet-dev-env
+    container_name: rivet-dev-container
+    
+    # Mount the local RIVET directory into /app in the container
+    volumes:
+      - .:/app
+    
+    # Keep the container running in the background
+    command: sleep infinity
+
+    # CRITICAL io_uring SETTINGS:
+    # 1. io_uring heavily relies on memory locking (ulimit -l) to pin buffers in RAM
+    # 2. Docker's default seccomp profile often blocks the io_uring_setup syscall
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    security_opt:
+      - seccomp=unconfined
