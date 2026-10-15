@@ -157,6 +157,7 @@ struct alignas(32) PacketRef {
       sequence      = other.sequence;
       track_id      = other.track_id;
       flags         = other.flags;
+      other.buffer  = nullptr;
     }
     return *this;
   }
