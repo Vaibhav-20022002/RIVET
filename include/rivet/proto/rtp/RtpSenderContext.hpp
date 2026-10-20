@@ -1,6 +1,6 @@
 #pragma once
 
-#include "PacketRef.hpp"
+#include "rivet/memory/PacketRef.hpp"
 #include <cstdint>
 
 namespace rivet::proto::rtp {

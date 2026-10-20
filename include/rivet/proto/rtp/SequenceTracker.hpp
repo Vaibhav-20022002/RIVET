@@ -25,6 +25,7 @@ class SequenceTracker {
   uint32_t received_prior{0};
 
   uint64_t seen_mask{0}; //< Bit 0 -> Newest pkt, Bit 1 -> pkt before that, etc.
+  bool     initialized{false};
 
   void init_source(uint16_t seq) noexcept {
     base_seq       = seq;
@@ -34,8 +35,9 @@ class SequenceTracker {
     received       = 0;
     expected_prior = 0;
     received_prior = 0;
-    probation      = MIN_SEQUENTIAL;
+    probation      = 0; //< Verified source: probation is complete!
     seen_mask      = 1; //< Mark index 0 (dist 0) as seen
+    initialized    = true;
   }
 
 public:
@@ -44,6 +46,12 @@ public:
   /// Returns the extended 64-bit sequence number if the packet is valid.
   /// Returns std::nullopt if the packet is a duplicate or an invalid jump.
   [[nodiscard]] std::optional<uint64_t> update(uint16_t seq) noexcept {
+    if (!initialized) {
+      init_source(seq);
+      ++received;
+      return cycles + seq;
+    }
+
     if (probation > 0) {
       if (seq == ((max_seq + 1) & 0xFFFF)) {
         max_seq = seq;

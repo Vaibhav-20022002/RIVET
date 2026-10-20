@@ -59,7 +59,7 @@ public:
           sps_b64 + "," + pps_b64 + ";\r\n";
     }
 
-    sdp += "a=control:*\r\n";
+    sdp += "a=control:streamid=0\r\n";
     return sdp;
   }
 };
