@@ -84,10 +84,19 @@ public:
         /// PacketRef copy constructor is called. This safely increments the atomic reference count
         /// of the underlying kernel memory buffer!
         burst.push_back(pkt);
+        if (burst.size() >= 128) {
+          break; //< Bound snapshot depth to prevent kernel buffer overflows
+        }
       }
     }
 
     return burst;
+  }
+
+  /// Clears all retained packets from the log, releasing underlying buffers immediately
+  void clear() noexcept {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    log.clear();
   }
 
   /// Returns the current number of packets in the log

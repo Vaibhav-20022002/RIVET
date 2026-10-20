@@ -28,20 +28,13 @@ class DependencyDropPolicy {
 public:
   DependencyDropPolicy() noexcept = default;
 
-  /// Evaluates whether an Access Unit should be kept or dropped based on how full the client's
-  /// queue is
-  ///\param au The completely assembled Video frame
-  ///\param queue_fill_pct How full the client's socket queue is (0 to 100)
-  ///\return DropDecision
-  [[nodiscard]] DropDecision evaluate(const AccessUnitView &au,
-      uint8_t                                               queue_fill_pct) const noexcept {
+  /// Evaluates whether a packet/frame should be kept or dropped based on priority and queue fill
+  /// percentage
+  [[nodiscard]] DropDecision evaluate(DependencyPriority prio,
+      uint8_t                                            queue_fill_pct) const noexcept {
     if (queue_fill_pct >= 100) {
-      /// If the queue is 100% full, the client's TCP/UDP socket buffer is completely jammed.
-      /// In live streaming, if we 100% full, the client has likely disconnected or frozen.
       return DropDecision::Disconnect;
     }
-
-    DependencyPriority prio = au.get_priority();
 
     if (prio == DependencyPriority::Disposable && queue_fill_pct >= DISPOSABLE_DROP_THRESHOLD) {
       return DropDecision::Drop;
@@ -52,12 +45,20 @@ public:
     }
 
     if (prio == DependencyPriority::Critical && queue_fill_pct >= CRITICAL_DROP_THRESHOLD) {
-      /// Dropping a critical frame (IDR) means the client will see a frozen screen until the next
-      /// IDR arrives. But if the queue is 95% full, we have no choice.
       return DropDecision::Drop;
     }
 
     return DropDecision::Keep;
+  }
+
+  /// Evaluates whether an Access Unit should be kept or dropped based on how full the client's
+  /// queue is
+  ///\param au The completely assembled Video frame
+  ///\param queue_fill_pct How full the client's socket queue is (0 to 100)
+  ///\return DropDecision
+  [[nodiscard]] DropDecision evaluate(const AccessUnitView &au,
+      uint8_t                                               queue_fill_pct) const noexcept {
+    return evaluate(au.get_priority(), queue_fill_pct);
   }
 };
 
