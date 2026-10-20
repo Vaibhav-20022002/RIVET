@@ -15,7 +15,7 @@ namespace rivet::net::io_uring {
 using rivet::memory::MemoryPool;
 
 /// Forward declarations
-class IoOperation;
+struct IoOperation;
 
 /// EgressReactor manages the io_uring event loop and handles backpressure queuing for a single CPU
 /// core

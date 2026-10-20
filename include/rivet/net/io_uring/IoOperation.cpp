@@ -1,3 +1,5 @@
+#if defined(__linux__)
+
 #include "IoOperation.hpp"
 
 #include "EgressReactor.hpp"
@@ -340,5 +342,6 @@ void IoOperation::on_cqe(int32_t res,
     }
   }
 }
-
 } //< namespace rivet::net::io_uring
+
+#endif //< defined(__linux__)
