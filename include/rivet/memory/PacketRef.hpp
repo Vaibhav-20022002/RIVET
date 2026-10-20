@@ -183,6 +183,11 @@ struct alignas(32) PacketRef {
 
   [[nodiscard]] bool is_rasl() const noexcept { return (flags & 0x10) != 0; }
 
+  /// Direct pointer to packet data
+  [[nodiscard]] const void *data() const noexcept {
+    return buffer ? reinterpret_cast<const void *>(buffer->data() + offset) : nullptr;
+  }
+
   /// Returns a bounds-checked span representing the exact memory of this packet
   [[nodiscard]] std::span<const std::byte> payload() const noexcept {
     return buffer ? std::span<const std::byte>{buffer->data() + offset, length}

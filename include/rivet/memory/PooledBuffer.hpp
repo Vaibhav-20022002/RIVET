@@ -43,11 +43,16 @@ public:
 
   [[nodiscard]] uint32_t size() const noexcept { return capacity; }
 
+  using RecycleFn = void (*)(PooledBuffer *) noexcept;
+  RecycleFn recycle_fn{nullptr};
+
 private:
   /// Returns this buffer back to the NumaArena's free list.
-  ///\note This function is implemented in CPP file because it will need to interact with the full
-  /// `NumaArena` class.
-  inline void recycle() noexcept {}
+  inline void recycle() noexcept {
+    if (recycle_fn) {
+      recycle_fn(this);
+    }
+  }
 };
 
 } //< namespace rivet::memory
