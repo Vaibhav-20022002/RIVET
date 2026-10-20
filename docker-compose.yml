@@ -10,8 +10,16 @@ services:
     volumes:
       - .:/app
     
+    # Load configuration from .env file
+    env_file:
+      - .env
+    
     # Keep the container running in the background
     command: sleep infinity
+
+    ports:
+      - "8554:8554"
+      - "20000-20010:20000-20010/udp"
 
     # CRITICAL io_uring SETTINGS:
     # 1. io_uring heavily relies on memory locking (ulimit -l) to pin buffers in RAM
