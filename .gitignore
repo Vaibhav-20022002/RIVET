@@ -67,6 +67,10 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# Configuration Files
+.env
+
 # Misc
 ARCHITECTURE.md
 flaw.md
+DECISIONS.md
