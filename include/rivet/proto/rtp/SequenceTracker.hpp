@@ -71,6 +71,9 @@ public:
     /// If `max_seq` is 65535 and the new seq is 2, so 2-65535 underflows and becomes exactly 3.
     /// This make sures that packet is 3 step ahead.
     uint16_t udelta = seq - max_seq;
+    if (udelta == 0) {
+      return std::nullopt; //< Immediate duplicate!
+    }
     if (udelta < MAX_DROPOUT) {
       /// In order, with allowable gap
       if (seq < max_seq) {
