@@ -2,6 +2,7 @@
 
 #include "AccessUnitView.hpp"
 #include "HevcRapClassifier.hpp"
+#include "rivet/core/Zones.hpp"
 #include <optional>
 
 namespace rivet::media {
@@ -25,6 +26,7 @@ public:
   /// \param marker_bit True if the camera says this is the LAST packet of the frame
   /// \return A completed AccessUnitView if the frame is fully assembled, `std::nullopt` otherwise
   [[nodiscard]] std::optional<AccessUnitView> on_packet(memory::PacketRef packet, bool marker_bit) {
+    RIVET_ZONE("Media::AuAssembler");
     uint32_t pkt_timestamp = packet.rtp_timestamp;
 
     /// 1. Did the timestamp change? (New Frame started)
@@ -41,16 +43,23 @@ public:
       is_building       = true;
       current_timestamp = pkt_timestamp;
 
-      /// We peek at the first 2 bytes of the payload to classify the frame's importance
-      HevcNalType type = HevcRapClassifier::classify(
-          reinterpret_cast<const uint8_t *>(packet.payload().data()), packet.length);
-
       DependencyPriority prio = DependencyPriority::Reference;
-      if (type == HevcNalType::IDR || type == HevcNalType::CRA ||
-          type == HevcNalType::ParameterSet) {
+      if ((packet.flags & 0x01) || (packet.flags & 0x02)) {
         prio = DependencyPriority::Critical;
-      } else if (type == HevcNalType::RASL) {
+      } else if (packet.flags & 0x10) {
         prio = DependencyPriority::Disposable;
+      } else if (!(packet.flags & 0x04) && packet.flags != 0) {
+        prio = DependencyPriority::Disposable;
+      } else {
+        /// Fallback to payload inspection
+        HevcNalType type = HevcRapClassifier::classify(
+            reinterpret_cast<const uint8_t *>(packet.payload().data()), packet.length);
+        if (type == HevcNalType::IDR || type == HevcNalType::CRA ||
+            type == HevcNalType::ParameterSet) {
+          prio = DependencyPriority::Critical;
+        } else if (type == HevcNalType::RASL) {
+          prio = DependencyPriority::Disposable;
+        }
       }
 
       current_au.begin(packet.sequence, current_timestamp, prio);
