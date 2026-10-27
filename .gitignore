@@ -39,6 +39,7 @@
 *.app
 
 # Build directories
+build
 build/
 Build/
 build-*/
@@ -74,3 +75,21 @@ Testing/
 ARCHITECTURE.md
 flaw.md
 DECISIONS.md
+
+bench/
+docs/perf/
+subprojects/google-benchmark.wrap
+subprojects/benchmark-*/
+subprojects/packagecache/benchmark-*
+subprojects/packagecache/google-benchmark_*
+# Benchmark results, flame graphs & traces
+bench_*.json
+bench_report.html
+flamegraph.svg
+flamegraph.json
+sample.txt
+# Build directories (both hyphens and underscores)
+build_*/
+build-*/
+# Local Agent configuration
+.agents/
