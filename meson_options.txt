@@ -1,0 +1,6 @@
+option('tests', type: 'feature', value: 'enabled', description: 'Build test suite')
+option('test_on_build', type: 'boolean', value: true, description: 'Run test suite as part of default build')
+option('e2e', type: 'feature', value: 'auto', description: 'Enable FFmpeg E2E test suite')
+option('coverage_gate', type: 'boolean', value: false, description: 'Instrument and enforce 100% coverage gate')
+option('trace_probes', type: 'boolean', value: false, description: 'Enable latency trace probes in the pipeline')
+option('tracy', type: 'boolean', value: false, description: 'Enable Tracy live profiler instrumentation')
