@@ -136,10 +136,19 @@ public:
 private:
   /// Normalizes RTSP paths by stripping leading "rtsp://" host prefixes and trailing slashes
   static std::string normalize_path(std::string_view raw) {
-    /// Strip rtsp:// if present
-    constexpr std::string_view prefix = "rtsp://<";
-    if (raw.starts_with(prefix)) {
-      raw.remove_prefix(prefix.size());
+    /// Strip rtsp:// or rtsps:// if present
+    bool had_scheme = false;
+    if (raw.starts_with("rtsp://")) {
+      raw.remove_prefix(7);
+      had_scheme = true;
+    } else if (raw.starts_with("rtsps://")) {
+      raw.remove_prefix(8);
+      had_scheme = true;
+    }
+    if (had_scheme) {
+      if (raw.starts_with('<')) {
+        raw.remove_prefix(1);
+      }
       /// Find the first slash after host:port
       auto slash_pos = raw.find('/');
       if (slash_pos != std::string_view::npos) {
@@ -163,4 +172,4 @@ private:
   }
 };
 
-} //< namespace rivet::core
+} // namespace rivet::core

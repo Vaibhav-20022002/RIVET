@@ -4,6 +4,7 @@
 #include "rivet/core/IngestReactor.hpp"
 #include "rivet/core/PacketRouter.hpp"
 #include "rivet/core/SubscriberSession.hpp"
+#include "rivet/core/Zones.hpp"
 #include "rivet/memory/PacketRef.hpp"
 #include <atomic>
 #include <cstddef>
@@ -113,20 +114,28 @@ public:
   ///\param packet The incoming owning PacketRef handle
   ///\return Assembled AccessUnitView if this packet completed a frame, or std::nullopt
   std::optional<media::AccessUnitView> process_incoming_packet(memory::PacketRef packet) {
+    RIVET_ZONE("Worker::process_incoming_packet");
     auto au = ingest.on_upstream_packet(std::move(packet));
 
-    /// Flush published packet batch across lock-free SPSC channels to Egress Reactors
+    broadcast_to_reactors();
+    step_egress_reactors();
+
+    return au;
+  }
+
+  /// Dispatches newly published packet batch across lock-free SPSC channels
+  void broadcast_to_reactors() {
     auto batch = ingest.publish_batch();
     if (!batch.empty()) {
       router.broadcast(batch);
     }
+  }
 
-    /// Step each egress reactor to poll the SPSC queue and dispatch to viewers
+  /// Steps each egress reactor event loop
+  void step_egress_reactors() {
     for (auto &reactor : egress_reactors) {
       reactor->step();
     }
-
-    return au;
   }
 
   /// Starts all reactor threads in the worker

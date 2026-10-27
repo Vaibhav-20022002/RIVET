@@ -1,8 +1,10 @@
 #pragma once
 
+#include "rivet/core/Zones.hpp"
 #include "rivet/media/AccessUnitView.hpp"
 #include "rivet/media/AuAssembler.hpp"
 #include "rivet/media/ConfigGeneration.hpp"
+#include "rivet/media/H264RapClassifier.hpp"
 #include "rivet/media/HevcRapClassifier.hpp"
 #include "rivet/media/RetainedPacketLog.hpp"
 #include "rivet/memory/PacketRef.hpp"
@@ -62,48 +64,60 @@ public:
   ///\param packet An owning PacketRef handle to the pooled packet memory
   ///\return An assembled AccessUnitView if this packet completes a video frame, or std::nullopt
   std::optional<media::AccessUnitView> on_upstream_packet(memory::PacketRef packet) {
+    RIVET_ZONE("Ingest::on_upstream_packet");
     if (!packet) {
       return std::nullopt;
     }
 
     /// Audio Track (track_id == 1)
     if (packet.track_id == 1) {
-      auto ext_seq = audio_seq_tracker.update(packet.sequence);
-      if (!ext_seq.has_value()) {
-        return std::nullopt;
-      }
-      egress_batch.push_back(std::move(packet));
-      return std::nullopt;
+      return handle_audio_packet(std::move(packet));
     }
 
     /// Video Track (track_id == 0)
+    return handle_video_packet(std::move(packet));
+  }
+
+  /// Processes inbound AAC audio packet
+  std::optional<media::AccessUnitView> handle_audio_packet(memory::PacketRef packet) {
+    auto ext_seq = audio_seq_tracker.update(packet.sequence);
+    if (!ext_seq.has_value()) {
+      return std::nullopt;
+    }
+    egress_batch.push_back(std::move(packet));
+    return std::nullopt;
+  }
+
+  /// Processes inbound H.264 video packet
+  std::optional<media::AccessUnitView> handle_video_packet(memory::PacketRef packet) {
     auto ext_seq = video_seq_tracker.update(packet.sequence);
     if (!ext_seq.has_value()) {
       return std::nullopt;
     }
 
     const bool marker = packet.is_marker();
-
-    /// Inspect video payload for Parameter Sets (VPS/SPS/PPS)
-    auto payload_span = packet.payload();
-    if (payload_span.size() >= 2) {
-      const auto *payload_ptr = reinterpret_cast<const uint8_t *>(payload_span.data());
-      auto        nal_type = media::HevcRapClassifier::classify(payload_ptr, payload_span.size());
-      if (nal_type == media::HevcNalType::ParameterSet) {
-        uint8_t raw_nal_type = (payload_ptr[0] >> 1) & 0x3F;
-        if (raw_nal_type == 32) { //< VPS_NUT
-          config_tracker.update_vps(payload_ptr, payload_span.size());
-        } else if (raw_nal_type == 33) { //< SPS_NUT
-          config_tracker.update_sps(payload_ptr, payload_span.size());
-        } else if (raw_nal_type == 34) { //< PPS_NUT
-          config_tracker.update_pps(payload_ptr, payload_span.size());
-        }
-      }
-    }
+    inspect_parameter_sets(packet);
 
     packet_log.append(packet);
     egress_batch.push_back(packet);
     return assembler.on_packet(std::move(packet), marker);
+  }
+
+  /// Inspects video payload for Parameter Sets (SPS/PPS, including STAP-A aggregation)
+  void inspect_parameter_sets(const memory::PacketRef &packet) {
+    auto payload_span = packet.payload();
+    if (!payload_span.empty()) {
+      const auto *payload_ptr = reinterpret_cast<const uint8_t *>(payload_span.data());
+      media::H264RapClassifier::for_each_parameter_set(payload_ptr,
+          payload_span.size(),
+          [&](media::H264NalType type, const uint8_t *ps_ptr, size_t ps_len) {
+            if (type == media::H264NalType::SPS) {
+              config_tracker.update_sps(ps_ptr, ps_len);
+            } else if (type == media::H264NalType::PPS) {
+              config_tracker.update_pps(ps_ptr, ps_len);
+            }
+          });
+    }
   }
 
   /// Flushes and returns the current egress batch for distribution across Egress Reactors

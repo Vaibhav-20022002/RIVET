@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rivet/core/Zones.hpp"
 #include "rivet/memory/PacketRef.hpp"
 #include <array>
 #include <atomic>
@@ -108,6 +109,7 @@ public:
   ///\param batch Array of packets emitted by IngestReactor::publish_batch()
   ///\return Total number of successful packet deliveries across all channels
   size_t broadcast(const std::vector<memory::PacketRef> &batch) {
+    RIVET_ZONE("Router::broadcast");
     size_t total_dispatched = 0;
 
     for (const auto &packet : batch) {

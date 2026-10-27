@@ -1,11 +1,15 @@
 #pragma once
 
+#include "rivet/config/RivetConfig.hpp"
+#include "rivet/core/Probes.hpp"
 #include "rivet/core/RivetWorker.hpp"
 #include "rivet/core/StreamRegistry.hpp"
 #include "rivet/core/SubscriberSession.hpp"
 #include "rivet/memory/NumaArena.hpp"
 #include "rivet/memory/PacketRef.hpp"
+#include "rivet/proto/rtp/RtpPacketClassifier.hpp"
 #include "rivet/proto/rtsp/RtspControlSession.hpp"
+#include "rivet/proto/rtsp/RtspStreamFramer.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <cerrno>
@@ -43,6 +47,10 @@ class RivetController {
   uint16_t rtsp_port{8554};
   uint16_t base_rtp_port{20000};
   uint16_t base_rtcp_port{20001};
+
+  uint16_t bound_rtsp_port{0};
+  uint16_t bound_video_port{0};
+  uint16_t bound_audio_port{0};
 
   /// Fixed-slab memory arena for network packet reception.
   /// MUST be declared before active_workers and registry so that on destruction,
@@ -87,12 +95,23 @@ public:
       uint32_t                      timeout_ms = 5000,
       std::string                   policy     = "FreshnessFirst",
       uint16_t                      rtp_port   = 20000,
-      uint16_t                      rtcp_port  = 20001)
+      uint16_t                      rtcp_port  = 20001,
+      size_t                        arena_cap  = 4096,
+      size_t                        arena_slab = 2048)
       : rtsp_port(port)
       , base_rtp_port(rtp_port)
       , base_rtcp_port(rtcp_port)
+      , arena(arena_cap, arena_slab)
       , watchdog_timeout_ms(timeout_ms)
       , startup_policy(std::move(policy)) {}
+
+  explicit RivetController(const config::RivetConfig &cfg)
+      : rtsp_port(cfg.rtsp_port)
+      , base_rtp_port(cfg.base_rtp_port)
+      , base_rtcp_port(cfg.base_rtcp_port)
+      , arena(cfg.numa_capacity, cfg.numa_slab_size)
+      , watchdog_timeout_ms(cfg.watchdog_timeout_ms)
+      , startup_policy(cfg.startup_policy) {}
 
   ~RivetController() { stop(); }
 
@@ -103,12 +122,17 @@ public:
   RivetController &operator=(RivetController &&)      = delete;
 
   [[nodiscard]] uint16_t get_port() const noexcept { return rtsp_port; }
+  [[nodiscard]] uint16_t get_bound_rtsp_port() const noexcept { return bound_rtsp_port; }
+  [[nodiscard]] uint16_t get_bound_video_port() const noexcept { return bound_video_port; }
+  [[nodiscard]] uint16_t get_bound_audio_port() const noexcept { return bound_audio_port; }
   [[nodiscard]] uint32_t get_watchdog_timeout_ms() const noexcept { return watchdog_timeout_ms; }
   void                   set_watchdog_timeout_ms(uint32_t ms) noexcept { watchdog_timeout_ms = ms; }
   [[nodiscard]] const std::string &get_startup_policy() const noexcept { return startup_policy; }
   void set_startup_policy(std::string policy) noexcept { startup_policy = std::move(policy); }
-  [[nodiscard]] StreamRegistry       &get_registry() noexcept { return registry; }
-  [[nodiscard]] const StreamRegistry &get_registry() const noexcept { return registry; }
+  [[nodiscard]] StreamRegistry          &get_registry() noexcept { return registry; }
+  [[nodiscard]] const StreamRegistry    &get_registry() const noexcept { return registry; }
+  [[nodiscard]] memory::NumaArena       &get_arena() noexcept { return arena; }
+  [[nodiscard]] const memory::NumaArena &get_arena() const noexcept { return arena; }
 
   /// Spawns and registers a new RivetWorker for an input stream
   std::shared_ptr<RivetWorker> spawn_worker(const std::string &stream_id,
@@ -211,8 +235,15 @@ public:
         is_running.store(false, std::memory_order_release);
         return;
       } else {
-        std::cout << "[RivetController] RTSP control plane listening on TCP port " << rtsp_port
-                  << "\n";
+        sockaddr_in baddr{};
+        socklen_t   blen = sizeof(baddr);
+        if (::getsockname(tcp_server_socket, reinterpret_cast<sockaddr *>(&baddr), &blen) == 0) {
+          bound_rtsp_port = ntohs(baddr.sin_port);
+        } else {
+          bound_rtsp_port = rtsp_port;
+        }
+        std::cout << "[RivetController] RTSP control plane listening on TCP port "
+                  << bound_rtsp_port << "\n";
       }
     }
 
@@ -229,8 +260,15 @@ public:
       addr.sin_port        = htons(base_rtp_port);
       addr.sin_addr.s_addr = INADDR_ANY;
       if (::bind(udp_video_socket, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
-        std::cout << "[RivetController] Ingest RTP video socket bound to UDP port " << base_rtp_port
-                  << "\n";
+        sockaddr_in baddr{};
+        socklen_t   blen = sizeof(baddr);
+        if (::getsockname(udp_video_socket, reinterpret_cast<sockaddr *>(&baddr), &blen) == 0) {
+          bound_video_port = ntohs(baddr.sin_port);
+        } else {
+          bound_video_port = base_rtp_port;
+        }
+        std::cout << "[RivetController] Ingest RTP video socket bound to UDP port "
+                  << bound_video_port << "\n";
       }
     }
 
@@ -246,8 +284,15 @@ public:
       addr.sin_port        = htons(static_cast<uint16_t>(base_rtp_port + 2));
       addr.sin_addr.s_addr = INADDR_ANY;
       if (::bind(udp_audio_socket, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+        sockaddr_in baddr{};
+        socklen_t   blen = sizeof(baddr);
+        if (::getsockname(udp_audio_socket, reinterpret_cast<sockaddr *>(&baddr), &blen) == 0) {
+          bound_audio_port = ntohs(baddr.sin_port);
+        } else {
+          bound_audio_port = static_cast<uint16_t>(base_rtp_port + 2);
+        }
         std::cout << "[RivetController] Ingest RTP audio socket bound to UDP port "
-                  << static_cast<uint16_t>(base_rtp_port + 2) << "\n";
+                  << bound_audio_port << "\n";
       }
     }
 
@@ -410,117 +455,62 @@ private:
 
         ctx.recv_buf.append(read_buf, static_cast<size_t>(n));
 
-        bool progress = true;
-        while (progress && !ctx.recv_buf.empty()) {
-          progress = false;
+        while (!ctx.recv_buf.empty()) {
+          auto frame =
+              proto::rtsp::RtspStreamFramer::next_frame(ctx.recv_buf, arena.get_slab_size());
+          if (frame.type == proto::rtsp::FramedMessageType::None) {
+            break;
+          }
+          if (frame.type == proto::rtsp::FramedMessageType::Error) {
+            ::close(ctx.fd);
+            dead_clients.push_back(ctx.fd);
+            break;
+          }
 
-          /// 1. Interleaved TCP RTP data: '$' <channel> <length_hi> <length_lo>
-          if (ctx.recv_buf[0] == '$') {
-            if (ctx.recv_buf.size() >= 4) {
-              uint8_t  channel = static_cast<uint8_t>(ctx.recv_buf[1]);
-              uint16_t plen    = (static_cast<uint8_t>(ctx.recv_buf[2]) << 8) |
-                  static_cast<uint8_t>(ctx.recv_buf[3]);
+          /// 1. Interleaved TCP RTP data
+          if (frame.type == proto::rtsp::FramedMessageType::Interleaved) {
+            uint8_t     track       = (frame.channel >= 2) ? 1 : 0;
+            const auto *payload_ptr = reinterpret_cast<const uint8_t *>(frame.data.data());
+            auto        rtp_info =
+                proto::rtp::RtpPacketClassifier::classify(payload_ptr, frame.length, track);
+            if (rtp_info.valid) {
+              auto *slab = arena.allocate();
+              if (slab) {
+                std::memcpy(slab->payload_data, payload_ptr, frame.length);
+                uint64_t now_ns =
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
+                RIVET_PROBE(IngestPacketReceived, now_ns, rtp_info.seq, track);
 
-              if (ctx.recv_buf.size() >= static_cast<size_t>(4 + plen)) {
-                progress = true;
-                const auto *payload_ptr =
-                    reinterpret_cast<const uint8_t *>(ctx.recv_buf.data() + 4);
+                auto pkt = memory::PacketRef::adopt(slab,
+                    0,
+                    frame.length,
+                    now_ns,
+                    rtp_info.timestamp,
+                    rtp_info.seq,
+                    track,
+                    rtp_info.flags);
 
-                if (plen >= 12) {
-                  uint16_t seq = (static_cast<uint16_t>(payload_ptr[2]) << 8) | payload_ptr[3];
-                  uint32_t ts  = (static_cast<uint32_t>(payload_ptr[4]) << 24) |
-                      (static_cast<uint32_t>(payload_ptr[5]) << 16) |
-                      (static_cast<uint32_t>(payload_ptr[6]) << 8) | payload_ptr[7];
-                  bool    marker = (payload_ptr[1] & 0x80) != 0;
-                  uint8_t track  = (channel >= 2) ? 1 : 0;
-                  uint8_t flags  = 0;
-                  if (marker) {
-                    flags |= 0x08;
-                  }
-
-                  if (track == 1) {
-                    flags |= 0x04; //< Audio packets are essential reference data
-                  } else if (track == 0 && plen > 12) {
-                    uint8_t nal_type    = payload_ptr[12] & 0x1F;
-                    uint8_t nal_ref_idc = (payload_ptr[12] >> 5) & 0x03;
-
-                    if (nal_type == 28 && plen > 13) {
-                      /// FU-A fragmented NAL unit
-                      uint8_t fu_type = payload_ptr[13] & 0x1F;
-                      if (nal_ref_idc != 0) {
-                        flags |= 0x04; //< Reference picture slice
-                      }
-                      if (fu_type == 5) {
-                        flags |= 0x04; //< All IDR fragments are reference
-                        if (payload_ptr[13] & 0x80) {
-                          flags |= 0x01; //< IDR Keyframe start fragment
-                        }
-                      }
-                    } else {
-                      /// Single NAL unit packet
-                      if (nal_ref_idc != 0) {
-                        flags |= 0x04; //< Reference picture slice, SPS, PPS
-                      }
-                      if (nal_type == 5) {
-                        flags |= 0x05; //< IDR Keyframe (bit 0 + bit 2)
-                      }
-                    }
-                  }
-
-                  auto *slab = arena.allocate();
-                  if (slab) {
-                    std::memcpy(slab->payload_data, payload_ptr, plen);
-                    uint64_t now_ns =
-                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
-                                .count());
-
-                    auto pkt =
-                        memory::PacketRef::adopt(slab, 0, plen, now_ns, ts, seq, track, flags);
-
-                    std::shared_ptr<RivetWorker> worker;
-                    {
-                      std::lock_guard<std::mutex> lk(workers_mutex);
-                      if (!active_workers.empty()) {
-                        worker = active_workers.begin()->second;
-                      }
-                    }
-
-                    if (worker) {
-                      worker->process_incoming_packet(std::move(pkt));
-                    }
+                std::shared_ptr<RivetWorker> worker;
+                {
+                  std::lock_guard<std::mutex> lk(workers_mutex);
+                  if (!active_workers.empty()) {
+                    worker = active_workers.begin()->second;
                   }
                 }
 
-                ctx.recv_buf.erase(0, 4 + plen);
+                if (worker) {
+                  worker->process_incoming_packet(std::move(pkt));
+                }
               }
             }
             continue;
           }
 
           /// 2. Text RTSP Request
-          auto hdr_end = ctx.recv_buf.find("\r\n\r\n");
-          if (hdr_end != std::string::npos) {
-            size_t req_len = hdr_end + 4;
-
-            auto cl_pos = ctx.recv_buf.find("Content-Length: ");
-            if (cl_pos == std::string::npos) {
-              cl_pos = ctx.recv_buf.find("content-length: ");
-            }
-
-            if (cl_pos != std::string::npos && cl_pos < hdr_end) {
-              size_t clen = std::strtoul(ctx.recv_buf.c_str() + cl_pos + 16, nullptr, 10);
-              if (ctx.recv_buf.size() < hdr_end + 4 + clen) {
-                break;
-              }
-              req_len = hdr_end + 4 + clen;
-            }
-
-            progress                = true;
-            std::string request_str = ctx.recv_buf.substr(0, req_len);
-            ctx.recv_buf.erase(0, req_len);
-
-            std::string_view req_view = request_str;
+          if (frame.type == proto::rtsp::FramedMessageType::RtspRequest) {
+            std::string_view req_view = frame.data;
             std::string      req_url;
             auto             sp1 = req_view.find(' ');
             if (sp1 != std::string_view::npos) {
@@ -648,47 +638,9 @@ private:
               break; //< Drained all packets currently in kernel buffer
             }
 
-            if (bytes >= 12) {
-              uint16_t seq = (static_cast<uint16_t>(buffer[2]) << 8) | buffer[3];
-              uint32_t ts  = (static_cast<uint32_t>(buffer[4]) << 24) |
-                  (static_cast<uint32_t>(buffer[5]) << 16) |
-                  (static_cast<uint32_t>(buffer[6]) << 8) | buffer[7];
-              bool    marker = (buffer[1] & 0x80) != 0;
-              uint8_t track  = static_cast<uint8_t>(i);
-              uint8_t flags  = 0;
-              if (marker) {
-                flags |= 0x08;
-              }
-
-              if (track == 1) {
-                flags |= 0x04; //< Audio packets are essential reference data
-              } else if (track == 0 && bytes > 12) {
-                uint8_t nal_type    = buffer[12] & 0x1F;
-                uint8_t nal_ref_idc = (buffer[12] >> 5) & 0x03;
-
-                if (nal_type == 28 && bytes > 13) {
-                  /// FU-A fragmented NAL unit
-                  uint8_t fu_type = buffer[13] & 0x1F;
-                  if (nal_ref_idc != 0) {
-                    flags |= 0x04; //< Reference picture slice
-                  }
-                  if (fu_type == 5) {
-                    flags |= 0x04; //< All IDR fragments are reference
-                    if (buffer[13] & 0x80) {
-                      flags |= 0x01; //< IDR Keyframe start fragment
-                    }
-                  }
-                } else {
-                  /// Single NAL unit packet
-                  if (nal_ref_idc != 0) {
-                    flags |= 0x04; //< Reference picture slice, SPS, PPS
-                  }
-                  if (nal_type == 5) {
-                    flags |= 0x05; //< IDR Keyframe (bit 0 + bit 2)
-                  }
-                }
-              }
-
+            auto rtp_info = proto::rtp::RtpPacketClassifier::classify(
+                buffer, static_cast<size_t>(bytes), static_cast<uint8_t>(i));
+            if (rtp_info.valid) {
               auto *slab = arena.allocate();
               if (slab) {
                 std::memcpy(slab->payload_data, buffer, static_cast<size_t>(bytes));
@@ -696,9 +648,16 @@ private:
                     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch())
                             .count());
+                RIVET_PROBE(IngestPacketReceived, now_ns, rtp_info.seq, rtp_info.track_id);
 
-                auto pkt = memory::PacketRef::adopt(
-                    slab, 0, static_cast<uint32_t>(bytes), now_ns, ts, seq, track, flags);
+                auto pkt = memory::PacketRef::adopt(slab,
+                    0,
+                    static_cast<uint32_t>(bytes),
+                    now_ns,
+                    rtp_info.timestamp,
+                    rtp_info.seq,
+                    rtp_info.track_id,
+                    rtp_info.flags);
 
                 std::shared_ptr<RivetWorker> worker;
                 {

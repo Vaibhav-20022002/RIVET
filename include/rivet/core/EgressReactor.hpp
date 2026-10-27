@@ -2,6 +2,7 @@
 
 #include "rivet/core/PacketRouter.hpp"
 #include "rivet/core/SubscriberSession.hpp"
+#include "rivet/core/Zones.hpp"
 #include "rivet/media/RetainedPacketLog.hpp"
 #include "rivet/memory/PacketRef.hpp"
 #include <arpa/inet.h>
@@ -95,7 +96,10 @@ public:
     if (packet_log && session->get_track_id() == 0 && session->get_startup_policy()) {
       auto burst = session->get_startup_policy()->start(*packet_log);
       for (auto &pkt : burst) {
-        session->enqueue_packet(std::move(pkt), true);
+        size_t len = pkt.length;
+        if (session->enqueue_packet(std::move(pkt), true)) {
+          aggregate_queued_bytes += len;
+        }
       }
     }
 
@@ -108,6 +112,12 @@ public:
   void remove_subscriber(uint64_t session_id) {
     auto it = subscribers.find(session_id);
     if (it != subscribers.end()) {
+      size_t unreleased = it->second->get_queued_bytes();
+      if (aggregate_queued_bytes >= unreleased) {
+        aggregate_queued_bytes -= unreleased;
+      } else {
+        aggregate_queued_bytes = 0;
+      }
       it->second->mark_closed();
       subscribers.erase(it);
     }
@@ -116,6 +126,7 @@ public:
   /// Consumes all available pre-retained PacketRefs from the SPSC channel and dispatches them
   /// across active subscriber queues without lock contention
   size_t poll_and_dispatch() {
+    RIVET_ZONE("Egress::poll_and_dispatch");
     if (!spsc_channel) {
       return 0;
     }
@@ -126,105 +137,139 @@ public:
     /// Drain incoming SPSC batch
     while (spsc_channel->try_pop(packet)) {
       ++dispatched;
-
-      /// Broadcast to all owned subscribers
-      for (auto it = subscribers.begin(); it != subscribers.end();) {
-        auto &session = it->second;
-
-        if (!session->active()) {
-          /// Cleanly evict dead or timed-out subscriber
-          it = subscribers.erase(it);
-          continue;
-        }
-
-        /// Check 16 MB reactor quota before enqueuing
-        if (aggregate_queued_bytes >= MAX_REACTOR_EGRESS_BYTES) {
-          ++total_packets_dropped;
-          ++it;
-          continue;
-        }
-
-        /// Enqueuing calls PacketRef copy constructor -> increments intrusive buffer ref_count
-        if (session->enqueue_packet(packet)) {
-          aggregate_queued_bytes += packet.length;
-          ++total_packets_dispatched;
-        } else {
-          ++total_packets_dropped;
-        }
-
-        ++it;
-      }
+      dispatch_packet_to_subscribers(packet);
     }
 
     return dispatched;
   }
 
-  /// Flushes packets from subscriber send queues towards network sockets
-  ///\return Total number of packets transferred to kernel/mock socket buffers
-  size_t flush_subscriber_sends() {
-    size_t sends_flushed = 0;
+  /// Broadcasts an ingested packet to all owned subscribers
+  bool dispatch_packet_to_subscribers(const memory::PacketRef &packet) {
+    bool any_dispatched = false;
+    for (auto it = subscribers.begin(); it != subscribers.end();) {
+      auto &session = it->second;
 
-    for (auto &pair : subscribers) {
-      auto &session = pair.second;
-      while (auto pkt_opt = session->pop_next_send()) {
-        ++sends_flushed;
-        if (aggregate_queued_bytes >= pkt_opt->length) {
-          aggregate_queued_bytes -= pkt_opt->length;
+      if (!session->active()) {
+        /// Cleanly evict dead or timed-out subscriber
+        size_t unreleased = session->get_queued_bytes();
+        if (aggregate_queued_bytes >= unreleased) {
+          aggregate_queued_bytes -= unreleased;
         } else {
           aggregate_queued_bytes = 0;
         }
-
-        if (session->get_transport() == SubscriberTransport::UdpDedicatedPorts) {
-          int out_sock = (session->get_track_id() == 1) ? udp_audio_socket : udp_video_socket;
-          if (out_sock < 0) {
-            if (udp_socket < 0) {
-              udp_socket = ::socket(AF_INET, SOCK_DGRAM, 0);
-            }
-            out_sock = udp_socket;
-          }
-          if (out_sock >= 0 && session->get_client_rtp_port() > 0) {
-            sockaddr_in dest{};
-#if defined(__APPLE__)
-            dest.sin_len = sizeof(dest);
-#endif
-            dest.sin_family = AF_INET;
-            dest.sin_port   = htons(session->get_client_rtp_port());
-            const char *ip_str =
-                session->get_client_ip().empty() ? "127.0.0.1" : session->get_client_ip().c_str();
-            ::inet_pton(AF_INET, ip_str, &dest.sin_addr);
-
-            ::sendto(out_sock,
-                pkt_opt->data(),
-                pkt_opt->length,
-                0,
-                reinterpret_cast<const struct sockaddr *>(&dest),
-                sizeof(dest));
-          }
-        } else if (session->get_transport() == SubscriberTransport::TcpInterleaved) {
-          int fd = session->get_socket_fd();
-          if (fd >= 0 && pkt_opt->length > 0 && pkt_opt->length <= 2048) {
-            uint8_t send_buf[2048 + 4];
-            send_buf[0] = '$';
-            send_buf[1] = session->get_tcp_channel();
-            send_buf[2] = static_cast<uint8_t>((pkt_opt->length >> 8) & 0xFF);
-            send_buf[3] = static_cast<uint8_t>(pkt_opt->length & 0xFF);
-            std::memcpy(send_buf + 4, pkt_opt->data(), pkt_opt->length);
-
-            const size_t total_len  = 4 + pkt_opt->length;
-            size_t       total_sent = 0;
-            while (total_sent < total_len) {
-              auto res = ::send(fd, send_buf + total_sent, total_len - total_sent, 0);
-              if (res <= 0) {
-                break;
-              }
-              total_sent += static_cast<size_t>(res);
-            }
-          }
-        }
+        it = subscribers.erase(it);
+        continue;
       }
+
+      /// Check 16 MB reactor quota before enqueuing
+      if (aggregate_queued_bytes >= MAX_REACTOR_EGRESS_BYTES) {
+        ++total_packets_dropped;
+        ++it;
+        continue;
+      }
+
+      /// Enqueuing calls PacketRef copy constructor -> increments intrusive buffer ref_count
+      if (session->enqueue_packet(packet)) {
+        aggregate_queued_bytes += packet.length;
+        ++total_packets_dispatched;
+        any_dispatched = true;
+      } else {
+        ++total_packets_dropped;
+      }
+
+      ++it;
+    }
+    return any_dispatched;
+  }
+
+  /// Flushes packets from subscriber send queues towards network sockets
+  ///\return Total number of packets transferred to kernel/mock socket buffers
+  size_t flush_subscriber_sends() {
+    RIVET_ZONE("Egress::flush_subscriber_sends");
+    size_t sends_flushed = 0;
+
+    for (auto &pair : subscribers) {
+      sends_flushed += drain_subscriber_queue(*pair.second);
     }
 
     return sends_flushed;
+  }
+
+  /// Drains all pending sends for a specific subscriber session
+  size_t drain_subscriber_queue(SubscriberSession &session) {
+    size_t drained = 0;
+    while (auto pkt_opt = session.pop_next_send()) {
+      ++drained;
+      if (aggregate_queued_bytes >= pkt_opt->length) {
+        aggregate_queued_bytes -= pkt_opt->length;
+      } else {
+        aggregate_queued_bytes = 0;
+      }
+
+      send_subscriber_packet(session, *pkt_opt);
+    }
+    return drained;
+  }
+
+  /// Dispatches media packet across configured subscriber transport
+  void send_subscriber_packet(SubscriberSession &session, const memory::PacketRef &pkt) {
+    if (session.get_transport() == SubscriberTransport::UdpDedicatedPorts) {
+      send_udp_datagram(session, pkt);
+    } else if (session.get_transport() == SubscriberTransport::TcpInterleaved) {
+      send_tcp_interleaved(session, pkt);
+    }
+  }
+
+  /// Transmits media packet via UDP dedicated ports
+  void send_udp_datagram(SubscriberSession &session, const memory::PacketRef &pkt) {
+    int out_sock = (session.get_track_id() == 1) ? udp_audio_socket : udp_video_socket;
+    if (out_sock < 0) {
+      if (udp_socket < 0) {
+        udp_socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+      }
+      out_sock = udp_socket;
+    }
+    if (out_sock >= 0 && session.get_client_rtp_port() > 0) {
+      sockaddr_in dest{};
+#if defined(__APPLE__)
+      dest.sin_len = sizeof(dest);
+#endif
+      dest.sin_family = AF_INET;
+      dest.sin_port   = htons(session.get_client_rtp_port());
+      const char *ip_str =
+          session.get_client_ip().empty() ? "127.0.0.1" : session.get_client_ip().c_str();
+      ::inet_pton(AF_INET, ip_str, &dest.sin_addr);
+
+      ::sendto(out_sock,
+          pkt.data(),
+          pkt.length,
+          0,
+          reinterpret_cast<const struct sockaddr *>(&dest),
+          sizeof(dest));
+    }
+  }
+
+  /// Transmits media packet via TCP interleaved framing ($ channel length payload)
+  void send_tcp_interleaved(SubscriberSession &session, const memory::PacketRef &pkt) {
+    int fd = session.get_socket_fd();
+    if (fd >= 0 && pkt.length > 0 && pkt.length <= 2048) {
+      uint8_t send_buf[2048 + 4];
+      send_buf[0] = '$';
+      send_buf[1] = session.get_tcp_channel();
+      send_buf[2] = static_cast<uint8_t>((pkt.length >> 8) & 0xFF);
+      send_buf[3] = static_cast<uint8_t>(pkt.length & 0xFF);
+      std::memcpy(send_buf + 4, pkt.data(), pkt.length);
+
+      const size_t total_len  = 4 + pkt.length;
+      size_t       total_sent = 0;
+      while (total_sent < total_len) {
+        auto res = ::send(fd, send_buf + total_sent, total_len - total_sent, 0);
+        if (res <= 0) {
+          break;
+        }
+        total_sent += static_cast<size_t>(res);
+      }
+    }
   }
 
   /// Runs one tick of the reactor event loop
@@ -244,6 +289,7 @@ public:
   void stop() noexcept {
     if (is_running.exchange(false, std::memory_order_release)) {
       subscribers.clear();
+      aggregate_queued_bytes = 0;
       if (udp_socket >= 0) {
         ::close(udp_socket);
         udp_socket = -1;
