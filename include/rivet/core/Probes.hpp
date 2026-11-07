@@ -1,8 +1,8 @@
 #pragma once
 
-#include <cstdint>
-
 #if defined(RIVET_ENABLE_PROBES)
+
+#include <cstdint>
 
 namespace rivet::core::probes {
 
