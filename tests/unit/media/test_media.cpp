@@ -1,3 +1,4 @@
+#include "rivet/core/IngestReactor.hpp"
 #include "rivet/media/AccessUnitView.hpp"
 #include "rivet/media/AuAssembler.hpp"
 #include "rivet/media/ConfigGeneration.hpp"
@@ -7,6 +8,11 @@
 #include "rivet/media/RetainedPacketLog.hpp"
 #include "rivet/media/StartupPolicy.hpp"
 #include "rivet/memory/NumaArena.hpp"
+#include "rivet/memory/PacketFlags.hpp"
+#include "rivet/proto/rtp/RtpPacketClassifier.hpp"
+#include "tests/support/ArenaLeakGuard.hpp"
+#include "tests/support/RtpBuilder.hpp"
+#include <cstring>
 #include <gtest/gtest.h>
 
 using namespace rivet::media;
@@ -20,46 +26,34 @@ TEST(H264RapClassifierTest, ClassifyNalTypes) {
   uint8_t short_p[1] = {0x00};
   EXPECT_EQ(H264RapClassifier::classify(short_p, 0), H264NalType::Regular);
 
-  /// Single NAL: 0x65 = NRI 3, Type 5 (IDR)
   uint8_t idr_pkt[] = {0x65, 0x88, 0x80};
   EXPECT_EQ(H264RapClassifier::classify(idr_pkt, sizeof(idr_pkt)), H264NalType::IDR);
 
-  /// SPS: 0x67 = NRI 3, Type 7
-  uint8_t sps_pkt[] = {0x67, 0x42, 0x00};
+  uint8_t sps_pkt[] = {0x67, 0x42, 0xC0, 0x1F};
   EXPECT_EQ(H264RapClassifier::classify(sps_pkt, sizeof(sps_pkt)), H264NalType::SPS);
 
-  /// PPS: 0x68 = NRI 3, Type 8
   uint8_t pps_pkt[] = {0x68, 0xCE, 0x01};
   EXPECT_EQ(H264RapClassifier::classify(pps_pkt, sizeof(pps_pkt)), H264NalType::PPS);
 
-  /// Non-IDR Slice: 0x41 = NRI 2, Type 1 (P-frame)
   uint8_t p_pkt[] = {0x41, 0x9A};
   EXPECT_EQ(H264RapClassifier::classify(p_pkt, sizeof(p_pkt)), H264NalType::Regular);
 
-  /// FU-A IDR: Type 28, Indicator 0x7C, FU header 0x85 (Start=1, Type=5)
+  /// H.264 NRI=2 Type 5 (0x45) and Type 2 (0x42) MUST NOT be
+  /// misclassified as HEVC PPS/SPS!
+  uint8_t idr_nri2[] = {0x45, 0x88, 0x80};
+  EXPECT_EQ(H264RapClassifier::classify(idr_nri2, sizeof(idr_nri2)), H264NalType::IDR);
+  uint8_t dpa_nri2[] = {0x42, 0x11, 0x22};
+  EXPECT_EQ(H264RapClassifier::classify(dpa_nri2, sizeof(dpa_nri2)), H264NalType::Regular);
+
   uint8_t fua_idr[] = {0x7C, 0x85, 0x12};
   EXPECT_EQ(H264RapClassifier::classify(fua_idr, sizeof(fua_idr)), H264NalType::IDR);
 
-  /// STAP-A: 0x78 = Type 24
   uint8_t stap_a[] = {0x78, 0x00, 0x03, 0x67, 0x42, 0x00};
   EXPECT_EQ(H264RapClassifier::classify(stap_a, sizeof(stap_a)), H264NalType::STAP_A);
 }
 
 TEST(H264RapClassifierTest, ForEachParameterSetStapA) {
-  /// STAP-A containing SPS (3 bytes) and PPS (3 bytes)
-  uint8_t stap_a[] = {
-      0x78, //< STAP-A header
-      0x00,
-      0x03, //< NALU 1 size = 3
-      0x67,
-      0x42,
-      0x00, //< SPS
-      0x00,
-      0x03, //< NALU 2 size = 3
-      0x68,
-      0xCE,
-      0x01 //< PPS
-  };
+  uint8_t stap_a[] = {0x78, 0x00, 0x03, 0x67, 0x42, 0x00, 0x00, 0x03, 0x68, 0xCE, 0x01};
 
   std::vector<H264NalType> found_types;
   std::vector<size_t>      found_sizes;
@@ -78,40 +72,38 @@ TEST(H264RapClassifierTest, ForEachParameterSetStapA) {
 }
 
 /// ============================================================================
-/// HevcRapClassifier Tests
+/// HevcRapClassifier Tests (NAL 9 == RASL)
 /// ============================================================================
 
 TEST(HevcRapClassifierTest, ClassifyNalTypes) {
-  /// Payload too short (<2 bytes)
   uint8_t short_p[1] = {0x00};
   EXPECT_EQ(HevcRapClassifier::classify(short_p, 1), HevcNalType::Regular);
 
-  /// HEVC NAL format: byte 0 has type in bits [1..6] -> (type << 1)
   auto make_hevc = [](uint8_t type) -> std::vector<uint8_t> {
     return {static_cast<uint8_t>((type & 0x3F) << 1), 0x01};
   };
 
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(6).data(), 2), HevcNalType::RADL);
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(7).data(), 2), HevcNalType::RADL);
   EXPECT_EQ(HevcRapClassifier::classify(make_hevc(8).data(), 2), HevcNalType::RASL);
-  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(9).data(), 2), HevcNalType::RADL);
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(9).data(), 2), HevcNalType::RASL);
   EXPECT_EQ(HevcRapClassifier::classify(make_hevc(19).data(), 2), HevcNalType::IDR);
   EXPECT_EQ(HevcRapClassifier::classify(make_hevc(20).data(), 2), HevcNalType::IDR);
   EXPECT_EQ(HevcRapClassifier::classify(make_hevc(21).data(), 2), HevcNalType::CRA);
-  EXPECT_EQ(
-      HevcRapClassifier::classify(make_hevc(32).data(), 2), HevcNalType::ParameterSet); //< VPS
-  EXPECT_EQ(
-      HevcRapClassifier::classify(make_hevc(33).data(), 2), HevcNalType::ParameterSet); //< SPS
-  EXPECT_EQ(
-      HevcRapClassifier::classify(make_hevc(34).data(), 2), HevcNalType::ParameterSet); //< PPS
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(32).data(), 2), HevcNalType::ParameterSet);
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(33).data(), 2), HevcNalType::ParameterSet);
+  EXPECT_EQ(HevcRapClassifier::classify(make_hevc(34).data(), 2), HevcNalType::ParameterSet);
   EXPECT_EQ(HevcRapClassifier::classify(make_hevc(1).data(), 2), HevcNalType::Regular);
 }
 
 /// ============================================================================
-/// AccessUnitView Tests
+/// AccessUnitView & AuAssembler Tests
 /// ============================================================================
 
 TEST(AccessUnitViewTest, BeginAndAppend) {
-  NumaArena arena(4, 256);
-  auto     *slab = arena.allocate();
+  NumaArena                   arena(4, 256);
+  rivet::test::ArenaLeakGuard guard(arena);
+  auto                       *slab = arena.allocate();
 
   AccessUnitView au;
   EXPECT_TRUE(au.is_empty());
@@ -126,191 +118,209 @@ TEST(AccessUnitViewTest, BeginAndAppend) {
 
   EXPECT_FALSE(au.is_empty());
   EXPECT_EQ(au.packet_count(), 1u);
-  EXPECT_EQ(au.get_packets().size(), 1u);
 }
 
-/// ============================================================================
-/// AuAssembler Tests
-/// ============================================================================
-
-TEST(AuAssemblerTest, SinglePacketAuAssembly) {
-  NumaArena arena(4, 256);
-  auto     *slab = arena.allocate();
+TEST(AuAssemblerTest, MultiPacketAuUpgradesPriorityAndDetectsIntraAuGap) {
+  NumaArena                   arena(8, 256);
+  rivet::test::ArenaLeakGuard guard(arena);
 
   AuAssembler assembler;
-  auto        pkt = PacketRef::adopt(slab, 0, 20, 0, 90000, 10, 0, 0x08);
+  /// First packet in AU is SPS/PPS (Reference, non-keyframe); second packet is IDR (Critical)!
+  auto p_sps =
+      PacketRef::adopt(arena.allocate(), 0, 20, 0, 90000, 10, 0, pkt::kParamSet | pkt::kRef);
+  auto p_idr = PacketRef::adopt(
+      arena.allocate(), 0, 60, 0, 90000, 11, 0, pkt::kClosedIrap | pkt::kRef | pkt::kMarker);
 
-  auto result = assembler.on_packet(std::move(pkt), true /* marker */);
-  ASSERT_TRUE(result.has_value());
-  EXPECT_EQ(result->get_start_sequence(), 10u);
-  EXPECT_EQ(result->get_rtp_timestamp(), 90000u);
-  EXPECT_EQ(result->packet_count(), 1u);
+  EXPECT_FALSE(assembler.on_packet(std::move(p_sps), false).has_value());
+  auto complete = assembler.on_packet(std::move(p_idr), true);
+  ASSERT_TRUE(complete.has_value());
+  EXPECT_EQ(complete->packet_count(), 2u);
+  /// Priority MUST upgrade from Reference -> Critical across all packets of the AU!
+  EXPECT_EQ(complete->get_priority(), DependencyPriority::Critical);
+
+  /// Intra-AU sequence gap (`seq 20` then `seq 22` skipping `21`) MUST poison/discard torn AU!
+  auto g1 = PacketRef::adopt(arena.allocate(), 0, 20, 0, 93000, 20, 0, pkt::kRef);
+  auto g2 = PacketRef::adopt(arena.allocate(), 0, 20, 0, 93000, 22, 0, pkt::kRef | pkt::kMarker);
+  EXPECT_FALSE(assembler.on_packet(std::move(g1), false).has_value());
+  EXPECT_FALSE(assembler.on_packet(std::move(g2), true).has_value());
 }
 
-TEST(AuAssemblerTest, MultiPacketAuAssembly) {
-  NumaArena arena(4, 256);
-  auto     *slab1 = arena.allocate();
-  auto     *slab2 = arena.allocate();
+TEST(AuAssemblerTest, AbortAuOnTimestampChangeBeforeMarkerWithoutLeakingSlab) {
+  NumaArena                   arena(4, 256);
+  rivet::test::ArenaLeakGuard guard(arena);
 
   AuAssembler assembler;
-  auto        pkt1 = PacketRef::adopt(slab1, 0, 20, 0, 90000, 10, 0, 0);
-  auto        pkt2 = PacketRef::adopt(slab2, 0, 20, 0, 90000, 11, 0, 0x08);
+  auto        pkt1 = PacketRef::adopt(arena.allocate(), 0, 20, 0, 90000, 10, 0, pkt::kRef);
+  EXPECT_FALSE(assembler.on_packet(std::move(pkt1), false).has_value());
 
-  auto res1 = assembler.on_packet(std::move(pkt1), false);
-  EXPECT_FALSE(res1.has_value());
-
-  auto res2 = assembler.on_packet(std::move(pkt2), true);
-  ASSERT_TRUE(res2.has_value());
-  EXPECT_EQ(res2->packet_count(), 2u);
-  EXPECT_EQ(res2->get_start_sequence(), 10u);
-}
-
-TEST(AuAssemblerTest, AbortAuOnTimestampChangeBeforeMarker) {
-  NumaArena arena(4, 256);
-  auto     *slab1 = arena.allocate();
-  auto     *slab2 = arena.allocate();
-
-  AuAssembler assembler;
-  /// Frame 1 packet without marker
-  auto                  pkt1 = PacketRef::adopt(slab1, 0, 20, 0, 90000, 10, 0, 0);
-  [[maybe_unused]] auto res1 = assembler.on_packet(std::move(pkt1), false);
-
-  /// New frame started (ts 93000) before frame 1 finished
-  auto pkt2 = PacketRef::adopt(slab2, 0, 20, 0, 93000, 12, 0, true);
+  auto pkt2 = PacketRef::adopt(
+      arena.allocate(), 0, 20, 0, 93000, 12, 0, pkt::kClosedIrap | pkt::kRef | pkt::kMarker);
   auto res2 = assembler.on_packet(std::move(pkt2), true);
 
   ASSERT_TRUE(res2.has_value());
-  /// Old frame was discarded; res2 contains the new frame starting at seq 12
   EXPECT_EQ(res2->get_start_sequence(), 12u);
   EXPECT_EQ(res2->get_rtp_timestamp(), 93000u);
+  EXPECT_EQ(res2->get_priority(), DependencyPriority::Critical);
 }
 
 /// ============================================================================
-/// ConfigTracker Tests
+/// ConfigTracker & Ingest Parameter-Set Extraction Tests
 /// ============================================================================
 
-TEST(ConfigTrackerTest, MonotonicGenerationTracking) {
+TEST(ConfigTrackerTest, PerAuStagedCommitAndBounded4SnapshotHistory) {
   ConfigTracker tracker;
   EXPECT_EQ(tracker.current_generation(), 0u);
 
-  uint8_t  sps1[] = {0x67, 0x42, 0x00};
-  uint32_t gen1   = tracker.update_sps(sps1, sizeof(sps1));
-  EXPECT_EQ(gen1, 1u);
+  /// Stage VPS + SPS + PPS in a single AU -> commit_au() bumps generation ONCE (0 -> 1)!
+  uint8_t vps1[] = {0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF};
+  uint8_t sps1[] = {0x42, 0x01, 0x01, 0x01, 0x60, 0x00};
+  uint8_t pps1[] = {0x44, 0x01, 0xC1, 0x73};
+  tracker.stage_vps(vps1, sizeof(vps1));
+  tracker.stage_sps(sps1, sizeof(sps1));
+  tracker.stage_pps(pps1, sizeof(pps1));
+  EXPECT_EQ(tracker.commit_au(), 1u);
   EXPECT_EQ(tracker.current_generation(), 1u);
 
-  /// Identical SPS does not bump generation
-  uint32_t gen1_again = tracker.update_sps(sps1, sizeof(sps1));
-  EXPECT_EQ(gen1_again, 1u);
+  /// Re-staging identical parameter sets produces NO generation bump
+  tracker.stage_vps(vps1, sizeof(vps1));
+  tracker.stage_sps(sps1, sizeof(sps1));
+  tracker.stage_pps(pps1, sizeof(pps1));
+  EXPECT_EQ(tracker.commit_au(), 1u);
 
-  /// Changed PPS bumps generation
-  uint8_t  pps1[] = {0x68, 0xCE, 0x01};
-  uint32_t gen2   = tracker.update_pps(pps1, sizeof(pps1));
-  EXPECT_EQ(gen2, 2u);
+  /// Push 5 distinct PPS updates to verify bounded 4-snapshot history ring
+  for (uint8_t i = 0; i < 5; ++i) {
+    uint8_t pps_mod[] = {0x44, 0x01, 0xC1, static_cast<uint8_t>(0x10U + i)};
+    EXPECT_GT(tracker.update_pps(pps_mod, sizeof(pps_mod)), 1u);
+  }
+  EXPECT_EQ(tracker.current_generation(), 6u);
+  /// Oldest generation 1 evicted from 4-slot ring; latest 4 generations (3..6) remain accessible
+  EXPECT_FALSE(tracker.get_generation(1).has_value());
+  EXPECT_TRUE(tracker.get_generation(6).has_value());
+}
 
-  /// Changed VPS bumps generation
-  uint8_t  vps1[] = {0x40, 0x01, 0x0C};
-  uint32_t gen3   = tracker.update_vps(vps1, sizeof(vps1));
-  EXPECT_EQ(gen3, 3u);
+TEST(IngestParameterSetRegressionTest, SkipsRtpHeaderAndNeverTreatsH264Idr0x45AsHevcPps) {
+  NumaArena                   arena(16, 2048);
+  rivet::test::ArenaLeakGuard guard(arena);
+  rivet::core::IngestReactor  ingest;
 
-  /// Historical generation retrieval
-  auto historical = tracker.get_generation(1);
-  ASSERT_TRUE(historical.has_value());
-  EXPECT_EQ(historical->generation_id, 1u);
-  EXPECT_EQ(historical->sps.size(), 3u);
-  EXPECT_TRUE(historical->pps.empty());
+  StreamDescriptor desc;
+  TrackDescriptor  vtrk;
+  vtrk.index = 0;
+  vtrk.kind  = MediaKind::Video;
+  vtrk.codec = VideoCodec::H264;
+  desc.tracks.push_back(vtrk);
+  ingest.set_stream_descriptor(desc);
+
+  auto adopt_rtp = [&](const std::vector<uint8_t> &wire) {
+    auto  info = rivet::proto::rtp::RtpPacketClassifier::classify(wire.data(), wire.size(), vtrk);
+    auto *slab = arena.allocate();
+    std::memcpy(slab->payload_data, wire.data(), wire.size());
+    return PacketRef::adopt(slab,
+        0,
+        static_cast<uint32_t>(wire.size()),
+        1000,
+        info.timestamp,
+        info.seq,
+        info.packed_track_meta,
+        info.flags);
+  };
+
+  /// Packet 1 (seq 10): STAP-A containing real H.264 SPS (0x67 42 C0 1F) and PPS (0x68 CE 3C 80)
+  std::vector<uint8_t> stap_a = {
+      0x78, 0x00, 0x04, 0x67, 0x42, 0xC0, 0x1F, 0x00, 0x04, 0x68, 0xCE, 0x3C, 0x80};
+  auto rtp1 =
+      rivet::test::RtpBuilder().seq(10).timestamp(90000).marker(false).payload(stap_a).build();
+
+  /// Packet 2 (seq 11): H.264 IDR slice starting with 0x45 (`NRI=2, Type=5`, which looks like HEVC
+  /// NAL 34 PPS `(0x45 >> 1) & 0x3F == 34` if misrouted!)
+  std::vector<uint8_t> idr_0x45 = {0x45, 0x88, 0x84, 0x21, 0xAA, 0xBB};
+  auto                 rtp2 =
+      rivet::test::RtpBuilder().seq(11).timestamp(90000).marker(true).payload(idr_0x45).build();
+
+  (void)ingest.on_upstream_packet(adopt_rtp(rtp1));
+  (void)ingest.on_upstream_packet(adopt_rtp(rtp2));
+  ingest.clear_batch();
+
+  const auto snap = ingest.get_config_tracker().current_snapshot();
+  ASSERT_NE(snap, nullptr);
+  EXPECT_EQ(snap->generation_id, 1u);
+  const auto expect_sps = std::vector<uint8_t>{0x67, 0x42, 0xC0, 0x1F};
+  const auto expect_pps = std::vector<uint8_t>{0x68, 0xCE, 0x3C, 0x80};
+  EXPECT_EQ(snap->sps, expect_sps);
+  EXPECT_EQ(snap->pps, expect_pps); //< NOT overwritten by 0x45 IDR or 0x80 RTP header!
 }
 
 /// ============================================================================
-/// DependencyDropPolicy Tests
+/// DependencyDropPolicy, RetainedPacketLog & StartupPolicy Tests
 /// ============================================================================
 
-TEST(DependencyDropPolicyTest, StrictThresholdEvaluation) {
+TEST(DependencyDropPolicyTest, StrictThresholdBoundaries) {
   DependencyDropPolicy policy;
 
-  /// Under 60% fill: Keep everything
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Disposable, 50), DropDecision::Keep);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Reference, 50), DropDecision::Keep);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 50), DropDecision::Keep);
-
-  /// 60% to 89% fill: Drop Disposable (B-frames), Keep Reference and Critical
+  EXPECT_EQ(policy.evaluate(DependencyPriority::Disposable, 59), DropDecision::Keep);
   EXPECT_EQ(policy.evaluate(DependencyPriority::Disposable, 60), DropDecision::Drop);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Disposable, 80), DropDecision::Drop);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Reference, 80), DropDecision::Keep);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 80), DropDecision::Keep);
-
-  /// 90% to 94% fill: Drop Reference (P-frames), Keep Critical (IDR)
+  EXPECT_EQ(policy.evaluate(DependencyPriority::Reference, 89), DropDecision::Keep);
   EXPECT_EQ(policy.evaluate(DependencyPriority::Reference, 90), DropDecision::Drop);
-  EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 90), DropDecision::Keep);
-
-  /// 95% to 99% fill: Drop Critical
+  EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 94), DropDecision::Keep);
   EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 95), DropDecision::Drop);
-
-  /// 100% fill: Disconnect
+  EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 99), DropDecision::Drop);
   EXPECT_EQ(policy.evaluate(DependencyPriority::Critical, 100), DropDecision::Disconnect);
 }
 
-/// ============================================================================
-/// RetainedPacketLog Tests
-/// ============================================================================
+TEST(RetainedPacketLogTest, Large300PacketIdrBurstNotTruncatedAt128) {
+  NumaArena                   arena(512, 2048);
+  rivet::test::ArenaLeakGuard guard(arena);
+  RetainedPacketLog           log(4096, 16ULL * 1024ULL * 1024ULL);
 
-TEST(RetainedPacketLogTest, AppendAndFindLatestRap) {
-  NumaArena         arena(8, 256);
-  RetainedPacketLog log;
-  EXPECT_EQ(log.size(), 0u);
-  EXPECT_FALSE(log.find_latest_rap_sequence().has_value());
+  /// Append a 300-packet fragmented 4K IDR AU (exceeding old 128-packet burst cap!)
+  const uint64_t start_pos  = log.ring().write_pos();
+  const uint64_t start_byte = log.ring().write_bytes();
+  for (uint16_t i = 0; i < 300; ++i) {
+    uint8_t fl = pkt::kRef;
+    if (i == 0) fl |= (pkt::kClosedIrap | pkt::kAuStart);
+    if (i == 299) fl |= pkt::kMarker;
+    auto p = PacketRef::adopt(
+        arena.allocate(), 0, 1200, 1000, 90000, static_cast<uint16_t>(1000 + i), 0, fl);
+    p.generation_id = 1;
+    log.ring().append(std::move(p));
+  }
+  RapEntry rap{};
+  rap.pos        = start_pos;
+  rap.byte_pos   = start_byte;
+  rap.rtp_ts     = 90000;
+  rap.generation = 1;
+  rap.au_bytes   = 300 * 1200;
+  rap.track_id   = 0;
+  rap.open_rap   = false;
+  rap.valid      = true;
+  log.ring().record_rap(rap);
 
-  auto *slab1 = arena.allocate();
-  auto *slab2 = arena.allocate();
-
-  /// P-frame
-  auto pkt1 = PacketRef::adopt(slab1, 0, 20, 0, 90000, 10, 0, 0x04);
-  log.append(std::move(pkt1));
-  EXPECT_EQ(log.size(), 1u);
-  EXPECT_FALSE(log.find_latest_rap_sequence().has_value());
-
-  /// IDR Keyframe (bit 0 = 1)
-  auto pkt2 = PacketRef::adopt(slab2, 0, 20, 0, 93000, 11, 0, 0x01 | 0x04);
-  log.append(std::move(pkt2));
-  EXPECT_EQ(log.size(), 2u);
-
-  auto rap = log.find_latest_rap_sequence();
-  ASSERT_TRUE(rap.has_value());
-  EXPECT_EQ(*rap, 11u);
-
-  /// Snapshot from RAP
-  auto burst = log.snapshot_from(11);
-  EXPECT_EQ(burst.size(), 1u);
-  EXPECT_EQ(burst[0].sequence, 11u);
-
-  log.clear();
-  EXPECT_EQ(log.size(), 0u);
-}
-
-/// ============================================================================
-/// StartupPolicy Tests
-/// ============================================================================
-
-TEST(StartupPolicyTest, FreshnessFirstPolicy) {
-  FreshnessFirstPolicy policy;
-  RetainedPacketLog    log;
-  EXPECT_TRUE(policy.requires_rtcp_pli());
-  EXPECT_TRUE(policy.start(log).empty());
-}
-
-TEST(StartupPolicyTest, FastPictureFirstPolicy) {
-  FastPictureFirstPolicy policy;
-  EXPECT_FALSE(policy.requires_rtcp_pli());
-
-  NumaArena         arena(4, 256);
-  RetainedPacketLog log;
-  /// Empty log
-  EXPECT_TRUE(policy.start(log).empty());
-
-  auto *slab    = arena.allocate();
-  auto  idr_pkt = PacketRef::adopt(slab, 0, 20, 0, 90000, 100, 0, 0x01);
-  log.append(std::move(idr_pkt));
+  FastPictureFirstPolicy policy(2 * 1024 * 1024, 1, true, 0);
+  const auto             plan = policy.plan_cursor(log.ring(), 0, 1, 2 * 1024 * 1024, true);
+  EXPECT_TRUE(plan.has_rap);
+  EXPECT_EQ(plan.start_pos, start_pos);
 
   auto burst = policy.start(log);
-  EXPECT_EQ(burst.size(), 1u);
+  ASSERT_EQ(burst.size(), 300u);
+  EXPECT_EQ(burst.front().sequence, 1000u);
+  EXPECT_EQ(burst.back().sequence, 1299u);
+}
+
+TEST(StartupPolicyTest, FreshnessFirstAndFastPictureFirstPolicies) {
+  NumaArena                   arena(4, 256);
+  rivet::test::ArenaLeakGuard guard(arena);
+  FreshnessFirstPolicy        fresh;
+  RetainedPacketLog           log;
+  EXPECT_TRUE(fresh.requires_rtcp_pli());
+  EXPECT_TRUE(fresh.start(log).empty());
+
+  FastPictureFirstPolicy fast;
+  EXPECT_FALSE(fast.requires_rtcp_pli());
+  EXPECT_TRUE(fast.start(log).empty());
+
+  auto idr_pkt = PacketRef::adopt(arena.allocate(), 0, 20, 0, 90000, 100, 0, pkt::kClosedIrap);
+  log.append(std::move(idr_pkt));
+  auto burst = fast.start(log);
+  ASSERT_EQ(burst.size(), 1u);
   EXPECT_EQ(burst[0].sequence, 100u);
 }

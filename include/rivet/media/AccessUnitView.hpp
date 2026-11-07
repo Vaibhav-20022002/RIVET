@@ -2,39 +2,46 @@
 
 #include "../memory/PacketRef.hpp"
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace rivet::media {
 
 /// Describes the importance of this Access Unit for decoding
 enum class DependencyPriority : uint8_t {
-  /// Cannot be dropped (IDR / CRA / SPS / PPS)
-  Critical,
+  /// Cannot be dropped lightly (IDR / CRA / BLA / VPS / SPS / PPS)
+  Critical = 0,
 
-  /// Can be dropped if the network is highly congested (P-frames)
-  Reference,
+  /// Reference frame (P-frames / reference B-frames / RADL)
+  Reference = 1,
 
-  /// Can be safely dropped at any time without corrupting the stream (B-frames / Non-reference)
-  Disposable
+  /// Non-reference / trailing disposable frame (non-ref B-frames / RASL / sub-layer non-ref)
+  Disposable = 2
 };
 
-/// An AccessUnitView represents one complete, decodable video frame.
-/// NOTE: Because out network stack is Zero-Copy, this object does NOT contain actual video bytes!
-///       Instead, it holds a lightweight list of reference-counted pointers(`PacketRef`) to the
-///       original kernel memory buffers where the UDP packets reside.
+[[nodiscard]] constexpr uint8_t priority_importance(DependencyPriority p) noexcept {
+  switch (p) {
+    case DependencyPriority::Critical:
+      return 2;
+    case DependencyPriority::Reference:
+      return 1;
+    case DependencyPriority::Disposable:
+      return 0;
+  }
+  return 0;
+}
+
+[[nodiscard]] constexpr DependencyPriority max_priority(DependencyPriority a,
+    DependencyPriority                                                     b) noexcept {
+  return (priority_importance(a) >= priority_importance(b)) ? a : b;
+}
+
+/// An AccessUnitView represents one complete, decodable video frame (Access Unit).
+/// Holds zero-copy reference-counted handles (`PacketRef`) to the underlying arena slabs.
 class AccessUnitView {
-  /// The RTP sequence number of the FIRST packet in this Access Unit
-  uint16_t start_sequence{0};
-
-  /// The RTP timestamp of the video frame(all packets in the AU share the exact timestamp)
-  uint32_t rtp_timestamp{0};
-
-  /// The importance of this frame
-  DependencyPriority priority{DependencyPriority::Reference};
-
-  /// The ordered list of network packets that make up this frame.
-  /// Because PacketRef manages the atomic reference count, the MemoryPool will keep these kernels
-  /// buffers alive for exactly as long as this AccessUnit exists!
+  uint16_t                       start_sequence{0};
+  uint32_t                       rtp_timestamp{0};
+  DependencyPriority             priority{DependencyPriority::Reference};
   std::vector<memory::PacketRef> packets;
 
 public:
@@ -48,10 +55,15 @@ public:
     packets.clear();
   }
 
+  /// Elevates AU importance when a higher-priority NAL (e.g. IDR slice after AUD/SEI) arrives
+  void elevate_priority(DependencyPriority candidate) noexcept {
+    priority = max_priority(priority, candidate);
+  }
+
   /// Appends a packet to this Access Unit
-  /// We take the PacketRef by value and std::move it into the vector, transferring ownership of the
-  /// atomic reference count safely.
   void append(memory::PacketRef packet) { packets.push_back(std::move(packet)); }
+
+  void clear() noexcept { packets.clear(); }
 
   [[nodiscard]] bool is_empty() const noexcept { return packets.empty(); }
 
@@ -63,7 +75,6 @@ public:
 
   [[nodiscard]] DependencyPriority get_priority() const noexcept { return priority; }
 
-  /// Exposes the underlying packet references for the EgressReactor to send
   [[nodiscard]] const std::vector<memory::PacketRef> &get_packets() const noexcept {
     return packets;
   }
