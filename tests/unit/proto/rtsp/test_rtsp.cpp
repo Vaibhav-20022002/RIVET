@@ -31,7 +31,7 @@ std::string valid_h264_sdp() {
 
 TEST(RtspControlSessionTest, OptionsRequestExcludesUnimplementedPause) {
   RtspControlSession session;
-  std::string_view   req  = "OPTIONS rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 1\r\n\r\n";
+  std::string_view   req  = "OPTIONS rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 1\r\n\r\n";
   std::string        resp = session.handle_request(req);
 
   EXPECT_TRUE(resp.starts_with("RTSP/1.0 200 OK\r\n"));
@@ -45,7 +45,7 @@ TEST(RtspControlSessionTest, OptionsRequestExcludesUnimplementedPause) {
 TEST(RtspControlSessionTest, AnnounceWithoutMediaLineReturns400) {
   RtspControlSession session;
   std::string        no_media_sdp = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Empty\r\nt=0 0\r\n";
-  std::string        ann_req      = "ANNOUNCE rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  std::string        ann_req      = "ANNOUNCE rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                                     "CSeq: 2\r\n"
                                     "Content-Type: application/sdp\r\n"
                                     "Content-Length: " +
@@ -58,14 +58,14 @@ TEST(RtspControlSessionTest, AnnounceWithoutMediaLineReturns400) {
 TEST(RtspControlSessionTest, DescribeBeforeAnnounceReturns404) {
   RtspControlSession session;
   std::string        resp = session.handle_request(
-      "DESCRIBE rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+      "DESCRIBE rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 1\r\n\r\n");
   EXPECT_TRUE(resp.starts_with("RTSP/1.0 404 Not Found\r\n"));
 }
 
 TEST(RtspControlSessionTest, AnnounceAndDeclarativeDescribeSdpExchange) {
   RtspControlSession session;
   const std::string  sdp          = valid_h264_sdp();
-  std::string        announce_req = "ANNOUNCE rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  std::string        announce_req = "ANNOUNCE rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                                     "CSeq: 2\r\n"
                                     "Content-Type: application/sdp\r\n"
                                     "Content-Length: " +
@@ -76,7 +76,7 @@ TEST(RtspControlSessionTest, AnnounceAndDeclarativeDescribeSdpExchange) {
   EXPECT_NE(ann_resp.find("CSeq: 2\r\n"), std::string::npos);
 
   std::string desc_resp = session.handle_request(
-      "DESCRIBE rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 3\r\n\r\n");
+      "DESCRIBE rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 3\r\n\r\n");
   EXPECT_TRUE(desc_resp.starts_with("RTSP/1.0 200 OK\r\n"));
   EXPECT_NE(desc_resp.find("c=IN IP4 0.0.0.0\r\n"), std::string::npos);
   EXPECT_NE(desc_resp.find("a=rtpmap:96 H264/90000\r\n"), std::string::npos);
@@ -89,7 +89,7 @@ TEST(RtspControlSessionTest, SetupTcpInterleavedMode) {
   RtspControlSession session(20000, 20001);
   session.set_announced_sdp(valid_h264_sdp());
 
-  std::string setup_req = "SETUP rtsp://localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
+  std::string setup_req = "SETUP rtsp://<localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
                           "CSeq: 4\r\n"
                           "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n";
 
@@ -107,7 +107,7 @@ TEST(RtspControlSessionTest, SetupUdpDedicatedPortsMode) {
   RtspControlSession session(20000, 20001);
   session.set_announced_sdp(valid_h264_sdp());
 
-  std::string setup_req = "SETUP rtsp://localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
+  std::string setup_req = "SETUP rtsp://<localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
                           "CSeq: 5\r\n"
                           "Transport: RTP/AVP/UDP;unicast;client_port=5004-5005\r\n\r\n";
 
@@ -126,18 +126,18 @@ TEST(RtspControlSessionTest, StrictStateValidationAndDynamicSessionLifecycle) {
 
   /// SETUP without Transport -> 461 Unsupported Transport
   std::string bad_setup =
-      session.handle_request("SETUP rtsp://localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
+      session.handle_request("SETUP rtsp://<localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
                              "CSeq: 1\r\n\r\n");
   EXPECT_TRUE(bad_setup.starts_with("RTSP/1.0 461 Unsupported Transport\r\n"));
 
   /// PLAY before SETUP -> 454 Session Not Found
   std::string bad_play = session.handle_request(
-      "PLAY rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 2\r\nSession: deadbeef\r\n\r\n");
+      "PLAY rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 2\r\nSession: deadbeef\r\n\r\n");
   EXPECT_TRUE(bad_play.starts_with("RTSP/1.0 454 Session Not Found\r\n"));
 
   /// Valid SETUP -> extract dynamic CSPRNG Session ID
   std::string setup_resp =
-      session.handle_request("SETUP rtsp://localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
+      session.handle_request("SETUP rtsp://<localhost:8554/live/test/trackID=0 RTSP/1.0\r\n"
                              "CSeq: 3\r\n"
                              "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
   ASSERT_TRUE(setup_resp.starts_with("RTSP/1.0 200 OK\r\n"));
@@ -145,27 +145,27 @@ TEST(RtspControlSessionTest, StrictStateValidationAndDynamicSessionLifecycle) {
   ASSERT_EQ(sid.size(), 16u);
 
   /// PLAY with wrong Session -> 454
-  std::string wrong_sid = session.handle_request(
-      "PLAY rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 4\r\nSession: "
-      "0000000000000000\r\n\r\n");
+  std::string wrong_sid =
+      session.handle_request("PLAY rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 4\r\nSession: "
+                             "0000000000000000\r\n\r\n");
   EXPECT_TRUE(wrong_sid.starts_with("RTSP/1.0 454 Session Not Found\r\n"));
 
   /// PLAY with negotiated Session -> 200 OK + RTP-Info
   std::string play_resp = session.handle_request(
-      "PLAY rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 5\r\nSession: " + sid + "\r\n\r\n");
+      "PLAY rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 5\r\nSession: " + sid + "\r\n\r\n");
   EXPECT_TRUE(play_resp.starts_with("RTSP/1.0 200 OK\r\n"));
   EXPECT_NE(play_resp.find("RTP-Info: "), std::string::npos);
   EXPECT_EQ(session.get_state(), RtspState::Playing);
 
   /// GET_PARAMETER keepalive -> 200 OK
   std::string gp_resp = session.handle_request(
-      "GET_PARAMETER rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 6\r\nSession: " + sid +
+      "GET_PARAMETER rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 6\r\nSession: " + sid +
       "\r\n\r\n");
   EXPECT_TRUE(gp_resp.starts_with("RTSP/1.0 200 OK\r\n"));
 
   /// TEARDOWN with negotiated Session -> 200 OK + Init
   std::string td_resp = session.handle_request(
-      "TEARDOWN rtsp://localhost:8554/live/test RTSP/1.0\r\nCSeq: 7\r\nSession: " + sid +
+      "TEARDOWN rtsp://<localhost:8554/live/test RTSP/1.0\r\nCSeq: 7\r\nSession: " + sid +
       "\r\n\r\n");
   EXPECT_TRUE(td_resp.starts_with("RTSP/1.0 200 OK\r\n"));
   EXPECT_EQ(session.get_state(), RtspState::Init);
@@ -186,7 +186,7 @@ TEST(RtspControlSessionTest, DigestAuthenticationChallengeAndVerify) {
   session.set_publish_credentials("publisher", "s3cr3t!");
 
   const std::string sdp  = valid_h264_sdp();
-  std::string       ann1 = "ANNOUNCE rtsp://localhost:8554/live/secure RTSP/1.0\r\n"
+  std::string       ann1 = "ANNOUNCE rtsp://<localhost:8554/live/secure RTSP/1.0\r\n"
                            "CSeq: 1\r\n"
                            "Content-Type: application/sdp\r\n"
                            "Content-Length: " +
@@ -198,8 +198,8 @@ TEST(RtspControlSessionTest, DigestAuthenticationChallengeAndVerify) {
   ASSERT_FALSE(nonce.empty());
 
   const std::string auth_hdr = rivet::test::RtspTestClient::make_digest_auth_header(
-      "ANNOUNCE", "rtsp://localhost:8554/live/secure", "RIVET", nonce, "publisher", "s3cr3t!");
-  std::string ann2 = "ANNOUNCE rtsp://localhost:8554/live/secure RTSP/1.0\r\n"
+      "ANNOUNCE", "rtsp://<localhost:8554/live/secure", "RIVET", nonce, "publisher", "s3cr3t!");
+  std::string ann2 = "ANNOUNCE rtsp://<localhost:8554/live/secure RTSP/1.0\r\n"
                      "CSeq: 2\r\n" +
       auth_hdr +
       "Content-Type: application/sdp\r\n"
@@ -361,10 +361,10 @@ TEST(RtspStreamFramerTest, NegativeContentLength43ByteLivelockReproducerIsError)
 }
 
 TEST(RtspStreamFramerTest, HugeContentLengthRejectedImmediatelyBeforeBodyWait) {
-  std::string huge = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nContent-Length: 99999999999\r\n\r\n";
+  std::string huge = "ANNOUNCE rtsp://<h/s RTSP/1.0\r\nContent-Length: 99999999999\r\n\r\n";
   EXPECT_EQ(RtspStreamFramer::next_frame(huge).type, FramedMessageType::Error);
 
-  std::string over_16k = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nContent-Length: 20000\r\n\r\n";
+  std::string over_16k = "ANNOUNCE rtsp://<h/s RTSP/1.0\r\nContent-Length: 20000\r\n\r\n";
   EXPECT_EQ(RtspStreamFramer::next_frame(over_16k).type, FramedMessageType::Error);
 }
 
@@ -382,7 +382,7 @@ TEST(RtspStreamFramerTest, CaseInsensitiveContentLengthIgnoresFakeHeaderPrefix) 
 
 TEST(RtspStreamFramerTest, SplitByteByByteWithCrPaddingIncrementalScan) {
   RtspReadBuffer rbuf(16384);
-  std::string    wire = "OPTIONS rtsp://127.0.0.1/live RTSP/1.0\r\n"
+  std::string    wire = "OPTIONS rtsp://<127.0.0.1/live RTSP/1.0\r\n"
                         "X-Pad: \r\r\r\r\r\r\r\r\r\r\r\n"
                         "CSeq: 7\r\n\r\n";
 

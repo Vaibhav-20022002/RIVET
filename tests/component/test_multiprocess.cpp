@@ -31,7 +31,7 @@ std::string make_mp_sdp(std::string_view title) {
 
 bool publish_stream(RtspTestClient &pub, uint16_t port, const std::string &path) {
   if (!pub.connect(port)) return false;
-  const std::string url = "rtsp://127.0.0.1:" + std::to_string(port) + "/" + path;
+  const std::string url = "rtsp://<127.0.0.1:" + std::to_string(port) + "/" + path;
   if (pub.request("ANNOUNCE", url, {}, make_mp_sdp(path)).status_code != 200) return false;
   if (pub.request("SETUP",
              url + "/streamid=0",
@@ -96,14 +96,14 @@ TEST(MultiProcessIsolationTest, ConcurrentStreamsIsolatedAcrossSigkillAndSub50ms
   /// 2. Unknown stream returns `404 Not Found` even while 2 streams are active!
   RtspTestClient probe;
   ASSERT_TRUE(probe.connect(port));
-  const std::string unknown_url = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/unknown";
+  const std::string unknown_url = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/unknown";
   EXPECT_EQ(probe.request("DESCRIBE", unknown_url).status_code, 404);
   probe.close_all();
 
   /// 3. Attach a live viewer to `/live/cam_b`
   RtspTestClient viewer_b;
   ASSERT_TRUE(viewer_b.connect(port));
-  const std::string url_b = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/cam_b";
+  const std::string url_b = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/cam_b";
   ASSERT_EQ(
       viewer_b
           .request(

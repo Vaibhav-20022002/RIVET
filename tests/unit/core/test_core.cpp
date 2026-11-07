@@ -288,14 +288,14 @@ TEST(StreamRegistryTest, RegisterRouteAndUnregister) {
   EXPECT_EQ(registry.route("live/camera1/trackID=1"), worker);
 
   /// Full RTSP URLs
-  EXPECT_EQ(registry.route("rtsps://localhost:8554/live/camera1"), worker);
-  EXPECT_EQ(registry.route("rtsp://127.0.0.1:8554/live/camera1/"), worker);
-  EXPECT_EQ(registry.route("rtsp://10.0.0.5:554/live/camera1/streamid=0"), worker);
+  EXPECT_EQ(registry.route("rtsps://<localhost:8554/live/camera1"), worker);
+  EXPECT_EQ(registry.route("rtsp://<127.0.0.1:8554/live/camera1/"), worker);
+  EXPECT_EQ(registry.route("rtsp://<10.0.0.5:554/live/camera1/streamid=0"), worker);
 
   /// Unknown streams MUST return nullptr even when active_stream_count() == 1!
   EXPECT_EQ(registry.route("live/unknown"), nullptr);
   EXPECT_EQ(registry.route("live/camera2"), nullptr);
-  EXPECT_EQ(registry.route("rtsp://127.0.0.1:8554/other/path"), nullptr);
+  EXPECT_EQ(registry.route("rtsp://<127.0.0.1:8554/other/path"), nullptr);
   EXPECT_EQ(registry.route("live/camera10"), nullptr); //< Prefix collision guard!
 
   /// Unregister

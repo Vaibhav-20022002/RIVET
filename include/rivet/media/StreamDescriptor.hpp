@@ -474,7 +474,7 @@ inline bool parse_fmtp_params(TrackDescriptor &track, std::string_view params) {
     std::string_view request_url) noexcept {
   /// Strip scheme and authority (`rtsp://host:port/...` -> `/...`)
   std::string_view path = request_url;
-  if (const auto scheme = path.find("://"); scheme != std::string_view::npos) {
+  if (const auto scheme = path.find("://<"); scheme != std::string_view::npos) {
     path.remove_prefix(scheme + 3U);
     if (const auto slash = path.find('/'); slash != std::string_view::npos) {
       path.remove_prefix(slash);

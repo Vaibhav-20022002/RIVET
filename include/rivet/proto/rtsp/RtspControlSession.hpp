@@ -390,7 +390,7 @@ private:
 
     if (stream_path_.empty()) {
       std::string_view p = req.uri;
-      if (const auto sch = p.find("://"); sch != std::string_view::npos) {
+      if (const auto sch = p.find("://<"); sch != std::string_view::npos) {
         p.remove_prefix(sch + 3U);
         p = (p.find('/') != std::string_view::npos) ? p.substr(p.find('/')) : std::string_view{};
       }

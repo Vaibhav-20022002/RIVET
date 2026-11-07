@@ -44,10 +44,10 @@ public:
     }
 
     bool had_scheme = false;
-    if (raw.starts_with("rtsp://")) {
+    if (raw.starts_with("rtsp://<")) {
       raw.remove_prefix(7);
       had_scheme = true;
-    } else if (raw.starts_with("rtsps://")) {
+    } else if (raw.starts_with("rtsps://<")) {
       raw.remove_prefix(8);
       had_scheme = true;
     }

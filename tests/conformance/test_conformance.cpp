@@ -25,7 +25,7 @@ protected:
                             "m=video 0 RTP/AVP 96\r\n"
                             "a=rtpmap:96 H264/90000\r\n"
                             "a=control:streamid=0\r\n";
-    const std::string req = "ANNOUNCE rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+    const std::string req = "ANNOUNCE rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                             "CSeq: 1\r\n"
                             "Content-Type: application/sdp\r\n"
                             "Content-Length: " +
@@ -36,7 +36,7 @@ protected:
 };
 
 TEST_F(RtspConformanceTest, OptionsReturnsPublicMethodsAndCSeq) {
-  std::string_view req = "OPTIONS rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  std::string_view req = "OPTIONS rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                          "CSeq: 1\r\n"
                          "User-Agent: ConformanceClient\r\n\r\n";
 
@@ -53,7 +53,7 @@ TEST_F(RtspConformanceTest, OptionsReturnsPublicMethodsAndCSeq) {
 
 TEST_F(RtspConformanceTest, DescribeReturns404BeforeAnnounceAndValidSdpAfterAnnounce) {
   /// DESCRIBE before ANNOUNCE returns 404 Not Found (never fake H.264 SDP)
-  std::string_view req = "DESCRIBE rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  std::string_view req = "DESCRIBE rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                          "CSeq: 2\r\n"
                          "Accept: application/sdp\r\n\r\n";
 
@@ -73,7 +73,7 @@ TEST_F(RtspConformanceTest, DescribeReturns404BeforeAnnounceAndValidSdpAfterAnno
 
 TEST_F(RtspConformanceTest, SetupDedicatedUdpPortsTransitionsToReady) {
   announce_h264_stream();
-  std::string_view req = "SETUP rtsp://localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
+  std::string_view req = "SETUP rtsp://<localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
                          "CSeq: 3\r\n"
                          "Transport: RTP/AVP;unicast;client_port=5000-5001\r\n\r\n";
 
@@ -93,7 +93,7 @@ TEST_F(RtspConformanceTest, SetupDedicatedUdpPortsTransitionsToReady) {
 
 TEST_F(RtspConformanceTest, SetupInterleavedTcpModeParsesChannel) {
   announce_h264_stream();
-  std::string_view req = "SETUP rtsp://localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
+  std::string_view req = "SETUP rtsp://<localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
                          "CSeq: 4\r\n"
                          "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n";
 
@@ -114,17 +114,17 @@ TEST_F(RtspConformanceTest, PlayTransitionsToPlayingWithRtpInfo) {
                             "a=rtpmap:96 H264/90000\r\n"
                             "a=control:streamid=0\r\n");
   session.set_play_rtp_info(
-      {PlayTrackRtpInfo{0, "rtsp://localhost:8554/live/test/streamid=0", true, 42, 90000}});
+      {PlayTrackRtpInfo{0, "rtsp://<localhost:8554/live/test/streamid=0", true, 42, 90000}});
 
   /// First SETUP and dynamically extract crypto-random `Session:` token
-  std::string_view  setup_req  = "SETUP rtsp://localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
+  std::string_view  setup_req  = "SETUP rtsp://<localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
                                  "CSeq: 10\r\n"
                                  "Transport: RTP/AVP;unicast;client_port=6000-6001\r\n\r\n";
   const std::string setup_resp = session.handle_request(setup_req);
   const std::string sid        = RtspTestClient::extract_session_header(setup_resp);
   ASSERT_FALSE(sid.empty());
 
-  const std::string play_req = "PLAY rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  const std::string play_req = "PLAY rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                                "CSeq: 11\r\n"
                                "Session: " +
       sid + "\r\n\r\n";
@@ -133,7 +133,7 @@ TEST_F(RtspConformanceTest, PlayTransitionsToPlayingWithRtpInfo) {
   EXPECT_NE(resp.find("RTSP/1.0 200 OK"), std::string::npos);
   EXPECT_NE(resp.find("Range: npt=0.000-"), std::string::npos);
   EXPECT_NE(
-      resp.find("RTP-Info: url=rtsp://localhost:8554/live/test/streamid=0;seq=42;rtptime=90000"),
+      resp.find("RTP-Info: url=rtsp://<localhost:8554/live/test/streamid=0;seq=42;rtptime=90000"),
       std::string::npos);
   EXPECT_EQ(session.get_state(), RtspState::Playing);
 }
@@ -141,14 +141,14 @@ TEST_F(RtspConformanceTest, PlayTransitionsToPlayingWithRtpInfo) {
 TEST_F(RtspConformanceTest, RecordTransitionsToRecording) {
   announce_h264_stream();
   std::string_view setup_req =
-      "SETUP rtsp://localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
+      "SETUP rtsp://<localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
       "CSeq: 20\r\n"
       "Transport: RTP/AVP;unicast;client_port=7000-7001;mode=record\r\n\r\n";
   const std::string setup_resp = session.handle_request(setup_req);
   const std::string sid        = RtspTestClient::extract_session_header(setup_resp);
   ASSERT_FALSE(sid.empty());
 
-  const std::string record_req = "RECORD rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  const std::string record_req = "RECORD rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                                  "CSeq: 21\r\n"
                                  "Session: " +
       sid + "\r\n\r\n";
@@ -161,14 +161,14 @@ TEST_F(RtspConformanceTest, RecordTransitionsToRecording) {
 
 TEST_F(RtspConformanceTest, TeardownTransitionsToInit) {
   announce_h264_stream();
-  std::string_view  setup_req  = "SETUP rtsp://localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
+  std::string_view  setup_req  = "SETUP rtsp://<localhost:8554/live/test/streamid=0 RTSP/1.0\r\n"
                                  "CSeq: 30\r\n"
                                  "Transport: RTP/AVP;unicast;client_port=8000-8001\r\n\r\n";
   const std::string setup_resp = session.handle_request(setup_req);
   const std::string sid        = RtspTestClient::extract_session_header(setup_resp);
   ASSERT_FALSE(sid.empty());
 
-  const std::string teardown_req = "TEARDOWN rtsp://localhost:8554/live/test RTSP/1.0\r\n"
+  const std::string teardown_req = "TEARDOWN rtsp://<localhost:8554/live/test RTSP/1.0\r\n"
                                    "CSeq: 31\r\n"
                                    "Session: " +
       sid + "\r\n\r\n";

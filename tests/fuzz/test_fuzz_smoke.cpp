@@ -55,7 +55,7 @@ TEST(FuzzSmokeSuite, TenThousandAdversarialMutationsAcrossAllFourParsers) {
   std::mt19937 rng(0xF0225EEDU);
 
   /// Rich structured corpus seeds for each parser
-  const std::string          rtsp_seed_str = "ANNOUNCE rtsp://127.0.0.1:8554/live/cam RTSP/1.0\r\n"
+  const std::string          rtsp_seed_str = "ANNOUNCE rtsp://<127.0.0.1:8554/live/cam RTSP/1.0\r\n"
                                              "CSeq: 2\r\nContent-Length: -43\r\n\r\n"
                                              "$0\x00\x10"
                                              "0123456789ABCDEF";
@@ -64,7 +64,7 @@ TEST(FuzzSmokeSuite, TenThousandAdversarialMutationsAcrossAllFourParsers) {
   const std::string sdp_seed_str =
       "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Fuzz\r\nt=0 0\r\n"
       "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H265/90000\r\n"
-      "a=fmtp:96 profile-id=1;level-id=120;sprop-vps=QAEMAf//AWAAAAMAAAMAAAMAAAMAeKwJ;"
+      "a=fmtp:96 profile-id=1;level-id=120;sprop-vps=QAEMAf//<AWAAAAMAAAMAAAMAAAMAeKwJ;"
       "sprop-max-don-diff=1;tx-mode=SRST\r\na=control:streamid=0\r\n";
   const std::vector<uint8_t> sdp_seed(sdp_seed_str.begin(), sdp_seed_str.end());
 

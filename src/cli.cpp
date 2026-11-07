@@ -189,10 +189,10 @@ int run(int argc, char **argv) {
 
   std::cout << "\nServer ready. Dynamic multi-stream workers spawn automatically on ANNOUNCE.\n\n";
   std::cout << "Example Stream Ingest (Publish) URL:\n";
-  std::cout << "  rtsp://" << host_str << ":" << bound_port << "/" << config.stream_name << "\n\n";
+  std::cout << "  rtsp://<" << host_str << ":" << bound_port << "/" << config.stream_name << "\n\n";
 
   std::cout << "Example Stream Egress (Playback) URL:\n";
-  std::cout << "  rtsp://" << host_str << ":" << bound_port << "/" << config.stream_name << "\n\n";
+  std::cout << "  rtsp://<" << host_str << ":" << bound_port << "/" << config.stream_name << "\n\n";
   std::cout << "Press Ctrl+C to stop.\n\n" << std::flush;
 
   while (g_running.load(std::memory_order_acquire)) {

@@ -47,7 +47,7 @@ bool start_tcp_publisher(RtspTestClient &pub,
     const std::string                   &stream_path,
     const std::string                   &sdp) {
   if (!pub.connect(port)) return false;
-  const std::string base = "rtsp://127.0.0.1:" + std::to_string(port) + "/" + stream_path;
+  const std::string base = "rtsp://<127.0.0.1:" + std::to_string(port) + "/" + stream_path;
   if (pub.request("OPTIONS", base).status_code != 200) return false;
   if (pub.request("ANNOUNCE", base, {}, sdp).status_code != 200) return false;
   if (pub.request("SETUP",
@@ -87,7 +87,7 @@ TEST_F(ComponentPipelineTest, FullPublishAndTcpViewerLoopbackWithPlayOrderingAnd
   ArenaLeakGuard  guard(controller.get_arena());
   ASSERT_TRUE(controller.start());
   const uint16_t    port = controller.get_bound_rtsp_port();
-  const std::string url  = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/pipeline";
+  const std::string url  = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/pipeline";
   ASSERT_GT(port, 0u);
 
   /// 1. Publisher connects and publishes initial SPS + PPS + IDR (3 packets clears 2-pkt probation)
@@ -180,7 +180,7 @@ TEST_F(ComponentPipelineTest, DedicatedUdpPublishAndUdpViewerHevcLoopback) {
   RivetController controller(config);
   ASSERT_TRUE(controller.start());
   const uint16_t    port = controller.get_bound_rtsp_port();
-  const std::string url  = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/hevc_udp";
+  const std::string url  = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/hevc_udp";
 
   /// 1. UDP Publisher announces HEVC and binds ephemeral client UDP port pair
   RtspTestClient pub;
@@ -256,7 +256,7 @@ TEST_F(ComponentPipelineTest, PublisherSecurityGuardsAndDigestAuthChallenge) {
   RivetController controller(config);
   ASSERT_TRUE(controller.start());
   const uint16_t    port = controller.get_bound_rtsp_port();
-  const std::string url  = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/secure";
+  const std::string url  = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/secure";
 
   RtspTestClient pub;
   ASSERT_TRUE(pub.connect(port));
@@ -364,7 +364,7 @@ TEST_F(ComponentPipelineTest, NegativeContentLengthDoSPayloadDisconnectedImmedia
   /// Healthy client immediately afterwards receives 200 OK
   RtspTestClient healthy;
   ASSERT_TRUE(healthy.connect(port));
-  EXPECT_EQ(healthy.request("OPTIONS", "rtsp://127.0.0.1/live/pipeline").status_code, 200);
+  EXPECT_EQ(healthy.request("OPTIONS", "rtsp://<127.0.0.1/live/pipeline").status_code, 200);
   healthy.close_all();
 
   controller.stop();
@@ -375,7 +375,7 @@ TEST_F(ComponentPipelineTest, Jumbo60KiBTcpInterleavedFrameDeliveredIntactAndDup
   RivetController controller(config);
   ASSERT_TRUE(controller.start());
   const uint16_t    port = controller.get_bound_rtsp_port();
-  const std::string url  = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/jumbo";
+  const std::string url  = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/jumbo";
 
   /// Second controller attempting to bind the exact same TCP port fails cleanly
   RivetConfig dup_cfg = config;
@@ -444,7 +444,7 @@ TEST_F(ComponentPipelineTest, StalledSlowTcpViewerEvictedWithoutBlockingHealthyV
   RivetController controller(config);
   ASSERT_TRUE(controller.start());
   const uint16_t    port = controller.get_bound_rtsp_port();
-  const std::string url  = "rtsp://127.0.0.1:" + std::to_string(port) + "/live/stall_test";
+  const std::string url  = "rtsp://<127.0.0.1:" + std::to_string(port) + "/live/stall_test";
 
   RtspTestClient pub;
   ASSERT_TRUE(start_tcp_publisher(pub, port, "live/stall_test", make_h264_sdp()));
