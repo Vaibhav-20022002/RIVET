@@ -75,6 +75,8 @@ Testing/
 ARCHITECTURE.md
 flaw.md
 DECISIONS.md
+commands.txt
+review/
 
 bench/
 docs/perf/
