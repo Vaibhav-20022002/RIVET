@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rivet/core/RivetWorker.hpp"
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -11,132 +11,38 @@
 
 namespace rivet::core {
 
-/// Dynamic Stream Registry routing RTSP mount paths to worker process instances.
-/// Provides O(1) concurrent path lookup for incoming DESCRIBE, SETUP, and ANNOUNCE
-/// requests.
-class StreamRegistry {
-  /// Maps stream_id (e.g. "camera1" or "/live/camera1") to its owning worker instance
-  std::unordered_map<std::string, std::shared_ptr<RivetWorker>> routes;
+class RivetWorker;
 
-  /// Reader-writer lock allowing unlimited concurrent route() reads
-  mutable std::shared_mutex registry_mutex;
+/// Generic thread-safe RTSP mount-path router.
+/// Performs exact normalized stream-path matching (plus track control sub-paths such as
+/// `/trackID=0` or `/streamid=0`) and NEVER falls back to an arbitrary unrelated stream.
+template<typename HandleT> class BasicStreamRegistry {
+  std::unordered_map<std::string, HandleT> routes_;
+  mutable std::shared_mutex                registry_mutex_;
+
+  [[nodiscard]] static bool is_track_suffix(std::string_view seg) noexcept {
+    return seg.starts_with("trackID=") || seg.starts_with("trackid=") ||
+        seg.starts_with("streamid=") || seg.starts_with("track");
+  }
 
 public:
-  StreamRegistry()  = default;
-  ~StreamRegistry() = default;
+  BasicStreamRegistry()  = default;
+  ~BasicStreamRegistry() = default;
 
-  /// Non-copyable, non-movable
-  StreamRegistry(const StreamRegistry &)            = delete;
-  StreamRegistry &operator=(const StreamRegistry &) = delete;
-  StreamRegistry(StreamRegistry &&)                 = delete;
-  StreamRegistry &operator=(StreamRegistry &&)      = delete;
+  BasicStreamRegistry(const BasicStreamRegistry &)            = delete;
+  BasicStreamRegistry &operator=(const BasicStreamRegistry &) = delete;
+  BasicStreamRegistry(BasicStreamRegistry &&)                 = delete;
+  BasicStreamRegistry &operator=(BasicStreamRegistry &&)      = delete;
 
-  /// Registers a worker instance under a specific stream identifier
-  ///\param stream_id Unique stream identifier or path (e.g. "front_gate")
-  ///\param worker Shared pointer to the RivetWorker instance
-  ///\return True if registered, false if stream_id is already in use
-  bool register_stream(std::string stream_id, std::shared_ptr<RivetWorker> worker) {
-    if (!worker || stream_id.empty()) {
-      return false;
+  /// Normalizes RTSP URLs/paths by stripping `rtsp://host:port`, query strings, leading/trailing `/`
+  [[nodiscard]] static std::string normalize_path(std::string_view raw) {
+    while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t' || raw.front() == '<')) {
+      raw.remove_prefix(1);
+    }
+    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t' || raw.back() == '>')) {
+      raw.remove_suffix(1);
     }
 
-    std::unique_lock<std::shared_mutex> lock(registry_mutex);
-    auto                                normalized = normalize_path(stream_id);
-    if (routes.find(normalized) != routes.end()) {
-      return false; //< Already registered
-    }
-
-    routes[normalized] = std::move(worker);
-    return true;
-  }
-
-  /// Resolves an incoming RTSP URL path (e.g. "rtsp://0.0.0.0:8554/live/front_gate") to its worker
-  ///\param path The requested URL or mount path
-  ///\return Shared pointer to RivetWorker, or nullptr if stream not found
-  [[nodiscard]] std::shared_ptr<RivetWorker> route(std::string_view path) const {
-    std::shared_lock<std::shared_mutex> lock(registry_mutex);
-    if (routes.empty()) {
-      return nullptr;
-    }
-
-    auto normalized = normalize_path(path);
-    auto it         = routes.find(normalized);
-    if (it != routes.end()) {
-      return it->second;
-    }
-
-    /// Check if path is a sub-track (e.g. "test/streamid=0" or "test/track0")
-    auto slash_pos = normalized.rfind('/');
-    if (slash_pos != std::string_view::npos) {
-      std::string parent_stream = normalized.substr(0, slash_pos);
-      auto        pit           = routes.find(parent_stream);
-      if (pit != routes.end()) {
-        return pit->second;
-      }
-    }
-
-    /// Fallback: if only 1 worker is registered, route to it
-    if (routes.size() == 1) {
-      return routes.begin()->second;
-    }
-
-    return nullptr;
-  }
-
-  /// Unregisters and tears down a stream path
-  ///\param stream_id The identifier to unregister
-  ///\return True if removed, false if not found
-  bool unregister_stream(std::string_view stream_id) {
-    std::unique_lock<std::shared_mutex> lock(registry_mutex);
-    auto                                normalized = normalize_path(stream_id);
-    auto                                it         = routes.find(normalized);
-    if (it != routes.end()) {
-      it->second->stop();
-      routes.erase(it);
-      return true;
-    }
-    return false;
-  }
-
-  /// Clears all routes and terminates worker processes cleanly
-  void clear() {
-    std::unique_lock<std::shared_mutex> lock(registry_mutex);
-    for (auto &pair : routes) {
-      if (pair.second) {
-        pair.second->stop();
-      }
-    }
-    routes.clear();
-  }
-
-  /// Checks if a stream path is currently registered and active
-  [[nodiscard]] bool has_stream(std::string_view stream_id) const {
-    std::shared_lock<std::shared_mutex> lock(registry_mutex);
-    auto                                normalized = normalize_path(stream_id);
-    return routes.find(normalized) != routes.end();
-  }
-
-  /// Returns total number of active streams registered
-  [[nodiscard]] size_t active_stream_count() const {
-    std::shared_lock<std::shared_mutex> lock(registry_mutex);
-    return routes.size();
-  }
-
-  /// Returns a snapshot of all active stream identifiers
-  [[nodiscard]] std::vector<std::string> list_streams() const {
-    std::shared_lock<std::shared_mutex> lock(registry_mutex);
-    std::vector<std::string>            list;
-    list.reserve(routes.size());
-    for (const auto &pair : routes) {
-      list.push_back(pair.first);
-    }
-    return list;
-  }
-
-private:
-  /// Normalizes RTSP paths by stripping leading "rtsp://" host prefixes and trailing slashes
-  static std::string normalize_path(std::string_view raw) {
-    /// Strip rtsp:// or rtsps:// if present
     bool had_scheme = false;
     if (raw.starts_with("rtsp://")) {
       raw.remove_prefix(7);
@@ -145,31 +51,155 @@ private:
       raw.remove_prefix(8);
       had_scheme = true;
     }
+
     if (had_scheme) {
-      if (raw.starts_with('<')) {
-        raw.remove_prefix(1);
+      const auto slash_pos = raw.find('/');
+      if (slash_pos == std::string_view::npos) {
+        return {};
       }
-      /// Find the first slash after host:port
-      auto slash_pos = raw.find('/');
-      if (slash_pos != std::string_view::npos) {
-        raw = raw.substr(slash_pos);
-      }
+      raw = raw.substr(slash_pos);
     }
 
-    /// Strip trailing slashes
-    while (raw.size() > 1 && raw.back() == '/') {
-      raw.remove_suffix(1);
+    const auto qpos = raw.find('?');
+    if (qpos != std::string_view::npos) {
+      raw = raw.substr(0, qpos);
     }
 
-    /// Strip leading /live/ or leading /
-    if (raw.starts_with("/live/")) {
-      raw.remove_prefix(6);
-    } else if (raw.starts_with('/')) {
+    while (!raw.empty() && raw.front() == '/') {
       raw.remove_prefix(1);
+    }
+    while (!raw.empty() && raw.back() == '/') {
+      raw.remove_suffix(1);
     }
 
     return std::string(raw);
   }
+
+  /// Extracts normalized stream base path (stripping trailing `/trackID=N` or `/streamid=N` if any)
+  [[nodiscard]] static std::string extract_stream_path(std::string_view raw_url) {
+    std::string norm = normalize_path(raw_url);
+    const auto  pos  = norm.rfind('/');
+    if (pos != std::string::npos) {
+      std::string_view tail(norm.data() + pos + 1, norm.size() - pos - 1);
+      if (is_track_suffix(tail)) {
+        norm.resize(pos);
+      }
+    }
+    return norm;
+  }
+
+  bool register_stream(std::string_view stream_id, HandleT handle) {
+    const std::string normalized = normalize_path(stream_id);
+    if (!handle || normalized.empty()) {
+      return false;
+    }
+
+    std::unique_lock<std::shared_mutex> lock(registry_mutex_);
+    if (routes_.find(normalized) != routes_.end()) {
+      return false;
+    }
+    routes_.emplace(normalized, std::move(handle));
+    return true;
+  }
+
+  void insert_or_replace(std::string_view stream_id, HandleT handle) {
+    const std::string normalized = normalize_path(stream_id);
+    if (!handle || normalized.empty()) {
+      return;
+    }
+    std::unique_lock<std::shared_mutex> lock(registry_mutex_);
+    routes_[normalized] = std::move(handle);
+  }
+
+  /// Exact path + sub-track lookup. Returns `nullptr` (`404 Not Found`) on unknown stream paths.
+  [[nodiscard]] HandleT route(std::string_view path) const {
+    const std::string normalized = normalize_path(path);
+    if (normalized.empty()) {
+      return nullptr;
+    }
+
+    std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+    auto                                it = routes_.find(normalized);
+    if (it != routes_.end()) {
+      return it->second;
+    }
+
+    const auto slash_pos = normalized.rfind('/');
+    if (slash_pos != std::string::npos) {
+      std::string_view tail(normalized.data() + slash_pos + 1, normalized.size() - slash_pos - 1);
+      if (is_track_suffix(tail)) {
+        std::string parent = normalized.substr(0, slash_pos);
+        auto        pit    = routes_.find(parent);
+        if (pit != routes_.end()) {
+          return pit->second;
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  template<typename StopFn>
+  bool unregister_stream_with(std::string_view stream_id, StopFn &&on_remove) {
+    const std::string normalized = normalize_path(stream_id);
+    HandleT           removed{};
+    {
+      std::unique_lock<std::shared_mutex> lock(registry_mutex_);
+      auto                                it = routes_.find(normalized);
+      if (it == routes_.end()) {
+        return false;
+      }
+      removed = std::move(it->second);
+      routes_.erase(it);
+    }
+    if (removed) {
+      on_remove(removed);
+    }
+    return true;
+  }
+
+  bool unregister_stream(std::string_view stream_id) {
+    return unregister_stream_with(stream_id, [](HandleT &h) { h->stop(); });
+  }
+
+  template<typename StopFn> void clear_with(StopFn &&on_remove) {
+    std::unordered_map<std::string, HandleT> snapshot;
+    {
+      std::unique_lock<std::shared_mutex> lock(registry_mutex_);
+      snapshot.swap(routes_);
+    }
+    for (auto &kv : snapshot) {
+      if (kv.second) {
+        on_remove(kv.second);
+      }
+    }
+  }
+
+  void clear() {
+    clear_with([](HandleT &h) { h->stop(); });
+  }
+
+  [[nodiscard]] bool has_stream(std::string_view stream_id) const {
+    const std::string                   normalized = normalize_path(stream_id);
+    std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+    return routes_.find(normalized) != routes_.end();
+  }
+
+  [[nodiscard]] size_t active_stream_count() const {
+    std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+    return routes_.size();
+  }
+
+  [[nodiscard]] std::vector<std::string> list_streams() const {
+    std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+    std::vector<std::string>            list;
+    list.reserve(routes_.size());
+    for (const auto &kv : routes_) {
+      list.push_back(kv.first);
+    }
+    return list;
+  }
 };
 
-} // namespace rivet::core
+using StreamRegistry = BasicStreamRegistry<std::shared_ptr<RivetWorker>>;
+
+} //< namespace rivet::core
