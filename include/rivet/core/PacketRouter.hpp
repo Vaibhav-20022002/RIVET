@@ -94,6 +94,7 @@ public:
 private:
   /// Dedicated point-to-point SPSC channel for each Egress Reactor shard
   std::vector<std::unique_ptr<PacketQueue>> egress_channels;
+  std::atomic<uint64_t>                     dropped_on_route_{0};
 
 public:
   PacketRouter() = default;
@@ -120,11 +121,16 @@ public:
         } else {
           /// Zone 4 backpressure: Egress queue overflow
           /// The lagging reactor drops the frame without stalling Ingest
+          dropped_on_route_.fetch_add(1, std::memory_order_relaxed);
         }
       }
     }
 
     return total_dispatched;
+  }
+
+  [[nodiscard]] uint64_t get_dropped_on_route() const noexcept {
+    return dropped_on_route_.load(std::memory_order_relaxed);
   }
 
   /// Retrieves consumer queue handle for a specific Egress Reactor shard
