@@ -5,128 +5,194 @@
 
 namespace rivet::proto::rtp {
 
-/// Strict RTP sequence tracker (RFC 3550 Appendix A.1)
-/// Extended to a 64-bit de-duplication window for high-bitrate video and rollovers.
+/// Strict RTP sequence tracker (RFC 3550 Appendix A.1):
+///   - Enforces `MIN_SEQUENTIAL = 2` source probation via `validate_source()` separate from
+///     `init_source()`.
+///   - Uses `BAD_SEQ_SENTINEL = RTP_SEQ_MOD + 1` (`65537`) so a stale `seq == 1` packet never
+///     falsely matches an uninitialized `bad_seq`.
+///   - Preserves monotonic `cycles` / `max_ext_seq` across stream restarts (never resets `cycles`
+///     to 0).
+///   - Uses a 128-bit sliding deduplication window (`seen_lo_`, `seen_hi_`) covering the full
+///     `MAX_MISORDER = 100` packet reordering window.
 class SequenceTracker {
-  static constexpr uint16_t MAX_DROPOUT    = 3000;
-  static constexpr uint16_t MAX_MISORDER   = 100;
-  static constexpr uint32_t MIN_SEQUENTIAL = 2;
+public:
+  static constexpr uint32_t RTP_SEQ_MOD      = (1U << 16U);
+  static constexpr uint32_t BAD_SEQ_SENTINEL = RTP_SEQ_MOD + 1U; //< 65537
+  static constexpr uint16_t MAX_DROPOUT      = 3000;
+  static constexpr uint16_t MAX_MISORDER     = 100;
+  static constexpr uint32_t MIN_SEQUENTIAL   = 2;
 
-  uint16_t max_seq{0}; //< Max 16-bit sequence number we have seen so far
-  uint64_t cycles{0};  //< Wraps (from 65536 to 0) add 65536 to this cycles variable
-  uint32_t base_seq{0};
-  uint32_t bad_seq{0}; //< Used to detect any anomaly (Camera restarts or crashes)
-  uint32_t probation{
-      MIN_SEQUENTIAL}; //< Shield against garbage. If a random packet arrives, stay in probation
-                       /// until MIN_SEQUENTIAL perfectly ordered packets in a row.
+private:
+  uint16_t max_seq_{0};
+  uint64_t cycles_{0};
+  uint64_t max_ext_seq_{0};
+  uint32_t base_seq_{0};
+  uint32_t bad_seq_{BAD_SEQ_SENTINEL};
+  uint32_t probation_{MIN_SEQUENTIAL};
 
-  uint32_t received{0};
-  uint32_t expected_prior{0};
-  uint32_t received_prior{0};
+  uint32_t received_{0};
+  uint32_t expected_prior_{0};
+  uint32_t received_prior_{0};
 
-  uint64_t seen_mask{0}; //< Bit 0 -> Newest pkt, Bit 1 -> pkt before that, etc.
-  bool     initialized{false};
+  /// 128-bit sliding deduplication window: bit `d` (0..127) == 1 iff `(max_ext_seq_ - d)` was seen
+  uint64_t seen_lo_{0};
+  uint64_t seen_hi_{0};
+  bool     initialized_{false};
+  bool     resynced_last_{false};
+
+  void shift_seen_window(uint64_t diff) noexcept {
+    if (diff >= 128ULL) {
+      seen_lo_ = 1ULL;
+      seen_hi_ = 0ULL;
+    } else if (diff >= 64ULL) {
+      seen_hi_ = (diff == 64ULL) ? seen_lo_ : (seen_lo_ << (diff - 64ULL));
+      seen_lo_ = 1ULL;
+    } else if (diff > 0ULL) {
+      seen_hi_ = (seen_hi_ << diff) | (seen_lo_ >> (64ULL - diff));
+      seen_lo_ = (seen_lo_ << diff) | 1ULL;
+    } else {
+      seen_lo_ |= 1ULL;
+    }
+  }
+
+  [[nodiscard]] bool is_seen(uint64_t dist) const noexcept {
+    if (dist >= 128ULL) return true; //< Older than 128-packet window -> reject as stale
+    if (dist >= 64ULL) {
+      return (seen_hi_ & (1ULL << (dist - 64ULL))) != 0ULL;
+    }
+    return (seen_lo_ & (1ULL << dist)) != 0ULL;
+  }
+
+  void mark_seen(uint64_t dist) noexcept {
+    if (dist >= 128ULL) return;
+    if (dist >= 64ULL) {
+      seen_hi_ |= (1ULL << (dist - 64ULL));
+    } else {
+      seen_lo_ |= (1ULL << dist);
+    }
+  }
+
+  void validate_source(uint16_t seq) noexcept {
+    max_seq_     = seq;
+    probation_   = MIN_SEQUENTIAL - 1U;
+    bad_seq_     = BAD_SEQ_SENTINEL;
+    initialized_ = true;
+  }
 
   void init_source(uint16_t seq) noexcept {
-    base_seq       = seq;
-    max_seq        = seq;
-    bad_seq        = (seq + 1) & 0xFFFF; //< Offset so it doesn't match seq on next call
-    cycles         = 0;
-    received       = 0;
-    expected_prior = 0;
-    received_prior = 0;
-    probation      = 0; //< Verified source: probation is complete!
-    seen_mask      = 1; //< Mark index 0 (dist 0) as seen
-    initialized    = true;
+    /// Guarantee monotonic extended sequence numbers across mid-stream restarts
+    if (received_ > 0U && (cycles_ + seq) <= max_ext_seq_) {
+      const uint64_t needed_cycles =
+          ((max_ext_seq_ - seq) / RTP_SEQ_MOD + 1ULL) * static_cast<uint64_t>(RTP_SEQ_MOD);
+      if (needed_cycles > cycles_) {
+        cycles_ = needed_cycles;
+      }
+    }
+    base_seq_       = seq;
+    max_seq_        = seq;
+    bad_seq_        = BAD_SEQ_SENTINEL;
+    probation_      = 0U;
+    max_ext_seq_    = cycles_ + seq;
+    seen_lo_        = 0b11ULL; //< Current seq and preceding probation packet are both seen
+    seen_hi_        = 0ULL;
+    expected_prior_ = 0U;
+    received_prior_ = 0U;
   }
 
 public:
   SequenceTracker() noexcept = default;
 
-  /// Returns the extended 64-bit sequence number if the packet is valid.
-  /// Returns std::nullopt if the packet is a duplicate or an invalid jump.
-  [[nodiscard]] std::optional<uint64_t> update(uint16_t seq) noexcept {
-    if (!initialized) {
-      init_source(seq);
-      ++received;
-      return cycles + seq;
-    }
+  void reset() noexcept { *this = SequenceTracker{}; }
 
-    if (probation > 0) {
-      if (seq == ((max_seq + 1) & 0xFFFF)) {
-        max_seq = seq;
-        if (--probation == 0) {
-          init_source(seq);
-          ++received;
-          return cycles + seq;
-        }
-      } else {
-        probation = MIN_SEQUENTIAL - 1;
-        max_seq   = seq;
+  [[nodiscard]] bool is_in_probation() const noexcept { return !initialized_ || probation_ > 0U; }
+  [[nodiscard]] bool did_resync_on_last() const noexcept { return resynced_last_; }
+  [[nodiscard]] uint32_t received_count() const noexcept { return received_; }
+  [[nodiscard]] uint64_t highest_extended_seq() const noexcept { return max_ext_seq_; }
+
+  /// Returns the extended 64-bit sequence number if the packet is valid and post-probation.
+  /// Returns std::nullopt during probation, on duplicate packets, or on unconfirmed jumps.
+  [[nodiscard]] std::optional<uint64_t> update(uint16_t seq) noexcept {
+    resynced_last_ = false;
+
+    if (!initialized_) {
+      validate_source(seq);
+      if (probation_ == 0U) {
+        init_source(seq);
+        ++received_;
+        return max_ext_seq_;
       }
       return std::nullopt;
     }
 
-    /// NOTE: Taking `udelta` as 16-bit so it can handle wrap-around calculation.
-    /// If `max_seq` is 65535 and the new seq is 2, so 2-65535 underflows and becomes exactly 3.
-    /// This make sures that packet is 3 step ahead.
-    uint16_t udelta = seq - max_seq;
-    if (udelta == 0) {
-      return std::nullopt; //< Immediate duplicate!
+    if (probation_ > 0U) {
+      if (seq == static_cast<uint16_t>(max_seq_ + 1U)) {
+        if (seq < max_seq_) {
+          cycles_ += RTP_SEQ_MOD;
+        }
+        max_seq_ = seq;
+        if (--probation_ == 0U) {
+          init_source(seq);
+          received_ += MIN_SEQUENTIAL;
+          return max_ext_seq_;
+        }
+      } else {
+        probation_ = MIN_SEQUENTIAL - 1U;
+        max_seq_   = seq;
+      }
+      return std::nullopt;
     }
+
+    const uint16_t udelta = static_cast<uint16_t>(seq - max_seq_);
+    if (udelta == 0U) {
+      return std::nullopt; //< Immediate duplicate
+    }
+
+    uint64_t ext_seq = 0;
+
     if (udelta < MAX_DROPOUT) {
-      /// In order, with allowable gap
-      if (seq < max_seq) {
-        cycles += (1ULL << 16);
+      /// In order, or forward jump within permissible dropout
+      if (seq < max_seq_) {
+        cycles_ += RTP_SEQ_MOD;
       }
-
-      max_seq = seq;
-
-      /// Shift duplicate tracking mask by the gap size
-      if (udelta >= 64) {
-        seen_mask = 0;
-      } else {
-        seen_mask <<= udelta;
-      }
-
-      seen_mask |= 1; //< Mark this new packet as seen (bit 0)
-    } else if (udelta <= (0xFFFF - MAX_MISORDER)) {
-      /// Sequence number made a very large jump
-      if (seq == bad_seq) {
-        /// Two consecutive packets arrived with this large jump, assume source restarted
+      max_seq_            = seq;
+      ext_seq             = cycles_ + seq;
+      const uint64_t diff = ext_seq - max_ext_seq_;
+      shift_seen_window(diff);
+      max_ext_seq_ = ext_seq;
+    } else if (udelta <= (RTP_SEQ_MOD - MAX_MISORDER)) {
+      /// Large sequence jump: require two consecutive packets before resynchronizing
+      if (bad_seq_ != BAD_SEQ_SENTINEL && seq == static_cast<uint16_t>(bad_seq_)) {
         init_source(seq);
+        resynced_last_ = true;
+        ++received_;
+        return max_ext_seq_;
+      }
+      bad_seq_ = (static_cast<uint32_t>(seq) + 1U) & (RTP_SEQ_MOD - 1U);
+      return std::nullopt;
+    } else {
+      /// Delayed / out-of-order packet within `MAX_MISORDER` (100 packets)
+      if (seq > max_seq_) {
+        if (cycles_ < RTP_SEQ_MOD) {
+          return std::nullopt; //< Precedes initial cycle 0
+        }
+        ext_seq = (cycles_ - RTP_SEQ_MOD) + seq;
       } else {
-        bad_seq = (seq + 1) & 0xFFFF;
+        ext_seq = cycles_ + seq;
+      }
+
+      if (ext_seq > max_ext_seq_) {
         return std::nullopt;
       }
-    } else {
-      /// Out of order (late packet)
-      uint64_t ext_seq     = cycles + seq;
-      uint64_t max_ext_seq = cycles + max_seq;
 
-      /// Handle wraparound edge case where late packet belongs to previous cycle
-      if (seq > max_seq) {
-        ext_seq -= (1ULL << 16);
+      const uint64_t dist = max_ext_seq_ - ext_seq;
+      if (dist > MAX_MISORDER || is_seen(dist)) {
+        return std::nullopt;
       }
-
-      if (ext_seq > max_ext_seq) {
-        return std::nullopt; //< Guard against monotonic failure
-      }
-
-      uint64_t dist = max_ext_seq - ext_seq;
-      if (dist >= 64) {
-        return std::nullopt; //< Too old for our 64-packet duplicate window
-      }
-
-      if (seen_mask & (1ULL << dist)) {
-        return std::nullopt; //< Duplicate!
-      }
-
-      seen_mask |= (1ULL << dist);
+      mark_seen(dist);
     }
 
-    ++received;
-    return cycles + seq;
+    ++received_;
+    return ext_seq;
   }
 };
 

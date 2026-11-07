@@ -3,6 +3,7 @@
 #include "rivet/memory/PacketRef.hpp"
 #include <array>
 #include <cstdint>
+#include <sys/socket.h>
 #include <sys/uio.h>
 
 /// Forward declare liburing structures to avoid dragging in the header here
@@ -59,17 +60,18 @@ struct IoOperation {
   int     fd{-1};
   int32_t result{0};
 
-  struct iovec iov[2];
+  struct iovec iov[2]{};
   int          iov_count{0};
-  uint32_t     total_bytes{0};
-  uint32_t     bytes_transferred{0};
+  /// Operation-owned descriptor preserving iovecs across SQ submission & partial retries
+  struct msghdr msg{};
+  uint32_t      total_bytes{0};
+  uint32_t      bytes_transferred{0};
 
   memory::PacketRef packet;
   /// Operation-owned header storage for '$' prefix, CSRCs & extensions
   std::array<uint8_t, 128> inline_hdr{};
 
-  /// Use void* here as a placeholder for boost::fibers::context* to avoid pulling in the heavy
-  /// boost headers in this core struct.
+  /// Placeholder for coroutine/fiber waiter handle
   void *waiter{nullptr};
 
   uint32_t pending_submissions{0};   //< Prepared I/O SQEs awaiting transfer CQEs
@@ -81,7 +83,7 @@ struct IoOperation {
   IoOperation *cancel_next{nullptr}; //< Intrusive cancellation queue link
 
   uint32_t dispatch_depth{0};        //< Active, possibly nested dispatch frames
-  bool     cancelled{false};         //< True if explicitly cancelled by reator
+  bool     cancelled{false};         //< True if explicitly cancelled by reactor
   bool     transfer_done{false};     //< True when all requested bytes have been transferred
   bool     zc_notified{false};       //< True when all promised notifications have arrived
   bool     consumer_released{false}; //< True when application has taken the result
@@ -93,7 +95,10 @@ struct IoOperation {
     return state == State::Completed || state == State::Failed || state == State::Eof;
   }
 
-  [[nodiscard]] bool is_queued() const noexcept { return in_pending_queue; }
+  /// Includes deferred backpressure and partial states
+  [[nodiscard]] bool is_queued() const noexcept {
+    return in_pending_queue || state == State::Backpressure || state == State::Partial;
+  }
 
   /// No queue, kernel request, consumer, or active dispatch may retain this record.
   [[nodiscard]] bool is_deallocatable() const noexcept {
